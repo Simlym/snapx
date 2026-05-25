@@ -1,1 +1,0 @@
-# SnapX\n\n轻量高效的截图 + 标注 + 贴图工具\n\n## Tech Stack\n\n- Tauri v2 + Rust\n- Svelte 5 + TypeScript\n- TailwindCSS\n
