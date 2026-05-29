@@ -41,6 +41,12 @@ pub struct WindowInfo {
 /// Encode an RGBA8 buffer to a base64 PNG using fast compression.
 /// Fast deflate + no row filtering trades a slightly larger file for a big
 /// drop in encode time — the right call for an interactive capture path.
+/// Public wrapper around the fast PNG encoder, used by the stitcher to emit
+/// the finished long screenshot.
+pub fn encode_rgba_png_base64(rgba: &[u8], width: u32, height: u32) -> Result<String, String> {
+    encode_rgba_to_base64_png(rgba, width, height)
+}
+
 fn encode_rgba_to_base64_png(rgba: &[u8], width: u32, height: u32) -> Result<String, String> {
     let mut bytes = Vec::new();
     let encoder = PngEncoder::new_with_quality(&mut bytes, CompressionType::Fast, FilterType::NoFilter);

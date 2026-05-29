@@ -13,6 +13,9 @@ pub struct PinStore(pub Mutex<HashMap<String, String>>);
 /// Tracks the currently registered global shortcut so we can swap it at runtime.
 pub struct CurrentShortcut(pub Mutex<Option<Shortcut>>);
 
+/// In-progress long-screenshot stitcher (one scroll session at a time).
+pub struct ScrollStitcher(pub Mutex<Option<crate::stitch::Stitcher>>);
+
 // ── Capture commands ──────────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -48,6 +51,66 @@ pub async fn list_monitors() -> Result<Vec<capture::MonitorInfo>, String> {
 #[tauri::command]
 pub async fn list_windows(monitor_index: Option<usize>) -> Result<Vec<capture::WindowInfo>, String> {
     capture::list_windows_for_monitor(monitor_index.unwrap_or(0))
+}
+
+// ── OCR ───────────────────────────────────────────────────────────────────────
+
+/// Recognise text in a base64-encoded PNG using the platform's on-device OCR.
+#[tauri::command]
+pub async fn ocr_image(image_data: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::ocr::recognize_base64_png(&image_data))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+// ── Long screenshot (scroll stitching) ──────────────────────────────────────────
+
+fn decode_png_to_rgba(image_data: &str) -> Result<image::RgbaImage, String> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(image_data)
+        .map_err(|e| e.to_string())?;
+    Ok(image::load_from_memory(&bytes)
+        .map_err(|e| e.to_string())?
+        .to_rgba8())
+}
+
+/// Start (or reset) a long-screenshot session.
+#[tauri::command]
+pub fn scroll_begin(state: tauri::State<ScrollStitcher>) -> Result<(), String> {
+    *state.0.lock().map_err(|e| e.to_string())? = Some(crate::stitch::Stitcher::new());
+    Ok(())
+}
+
+/// Add one captured scroll frame (base64 PNG). Returns the accumulated height.
+#[tauri::command]
+pub async fn scroll_add_frame(
+    state: tauri::State<'_, ScrollStitcher>,
+    image_data: String,
+) -> Result<u32, String> {
+    let frame = decode_png_to_rgba(&image_data)?;
+    let mut guard = state.0.lock().map_err(|e| e.to_string())?;
+    let stitcher = guard.as_mut().ok_or("长截图会话未开始")?;
+    stitcher.add_frame(&frame)
+}
+
+/// Finish the session and return the stitched image as a base64 PNG.
+#[tauri::command]
+pub fn scroll_finish(state: tauri::State<ScrollStitcher>) -> Result<capture::CaptureResult, String> {
+    let stitcher = state
+        .0
+        .lock()
+        .map_err(|e| e.to_string())?
+        .take()
+        .ok_or("长截图会话未开始")?;
+    let img = stitcher.finish().ok_or("没有捕获到任何帧")?;
+    let (w, h) = (img.width(), img.height());
+    let data = capture::encode_rgba_png_base64(img.as_raw(), w, h)?;
+    Ok(capture::CaptureResult {
+        image_data: data,
+        width: w,
+        height: h,
+        monitor_id: 0,
+    })
 }
 
 // ── Clipboard / file commands ─────────────────────────────────────────────────

@@ -8,6 +8,8 @@ use tauri::{
 
 mod capture;
 mod commands;
+mod ocr;
+mod stitch;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -18,11 +20,13 @@ pub fn run() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(commands::PinStore(Mutex::new(HashMap::new())))
         .manage(commands::CurrentShortcut(Mutex::new(None)))
+        .manage(commands::ScrollStitcher(Mutex::new(None)))
         .setup(|app| {
             // ── System tray menu ──────────────────────────────────────
             let capture_item     = MenuItem::with_id(app, "capture",          "📸 区域截图 (Ctrl+Shift+X)", true, None::<&str>)?;
             let window_item      = MenuItem::with_id(app, "capture-window",   "🪟 窗口截图",               true, None::<&str>)?;
             let fullscreen_item  = MenuItem::with_id(app, "capture-fullscreen","🖥️ 全屏截图",              true, None::<&str>)?;
+            let scroll_item      = MenuItem::with_id(app, "capture-scroll",    "📜 长截图（滚动）",         true, None::<&str>)?;
             let delay2_item      = MenuItem::with_id(app, "capture-delay-2",  "⏱ 延迟 2 秒截图",          true, None::<&str>)?;
             let delay5_item      = MenuItem::with_id(app, "capture-delay-5",  "⏱ 延迟 5 秒截图",          true, None::<&str>)?;
             let paste_pin_item   = MenuItem::with_id(app, "paste-pin",        "📋 粘贴为贴图",             true, None::<&str>)?;
@@ -34,7 +38,7 @@ pub fn run() {
             let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
 
             let menu = Menu::with_items(app, &[
-                &capture_item, &window_item, &fullscreen_item,
+                &capture_item, &window_item, &fullscreen_item, &scroll_item,
                 &sep1,
                 &delay2_item, &delay5_item,
                 &sep2,
@@ -63,6 +67,11 @@ pub fn run() {
                         "capture-fullscreen" => {
                             tauri::async_runtime::spawn(async move {
                                 let _ = ah.emit("trigger-capture", "fullscreen");
+                            });
+                        }
+                        "capture-scroll" => {
+                            tauri::async_runtime::spawn(async move {
+                                let _ = ah.emit("trigger-capture", "scroll");
                             });
                         }
                         "capture-delay-2" => {
@@ -131,6 +140,10 @@ pub fn run() {
             commands::read_clipboard_image,
             commands::list_monitors,
             commands::list_windows,
+            commands::ocr_image,
+            commands::scroll_begin,
+            commands::scroll_add_frame,
+            commands::scroll_finish,
             commands::store_pin_data,
             commands::get_pin_data,
             commands::remove_pin_data,

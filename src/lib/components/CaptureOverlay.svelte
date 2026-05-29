@@ -29,9 +29,16 @@
     onquicksave?: (imageData: string) => void;
     onpin?: (imageData: string, pxW: number, pxH: number) => void;
     oncancel?: () => void;
+    /** Long-screenshot mode: emits the chosen region in physical pixels. */
+    scrollMode?: boolean;
+    onscroll?: (region: { x: number; y: number; w: number; h: number }) => void;
   }
 
-  let { screenshotData, screenshotWidth, screenshotHeight, oncopy, onsave, onquicksave, onpin, oncancel }: Props = $props();
+  let {
+    screenshotData, screenshotWidth, screenshotHeight,
+    oncopy, onsave, onquicksave, onpin, oncancel,
+    scrollMode = false, onscroll,
+  }: Props = $props();
   let bgSrc = $derived(`data:image/png;base64,${screenshotData}`);
 
   // ── Phase ──────────────────────────────────────────────────────────
@@ -263,6 +270,7 @@
     }
 
     if (e.key === 'Enter') {
+      if (scrollMode && phase === 'selecting' && hasSel) { confirmScrollRegion(); return; }
       if (phase === 'selecting' && hasSel) { enterAnnotating(); return; }
       if (phase === 'annotating') { doExport('copy'); return; }
     }
@@ -576,6 +584,50 @@
     else if (action === 'pin')       onpin?.(data, width, height);
   }
 
+  // ── OCR ────────────────────────────────────────────────────────────
+  let ocrText = $state<string | null>(null);
+  let ocrBusy = $state(false);
+  let ocrError = $state<string | null>(null);
+  let ocrCopied = $state(false);
+
+  async function runOcr() {
+    ocrBusy = true;
+    ocrError = null;
+    try {
+      const { data } = await compositeImage();
+      const text = await invoke<string>('ocr_image', { imageData: data });
+      ocrText = text.trim();
+      if (!ocrText) ocrError = '未识别到文字';
+    } catch (e) {
+      ocrError = String(e);
+    } finally {
+      ocrBusy = false;
+    }
+  }
+
+  async function copyOcrText() {
+    if (!ocrText) return;
+    try {
+      await navigator.clipboard.writeText(ocrText);
+      ocrCopied = true;
+      setTimeout(() => (ocrCopied = false), 1000);
+    } catch (_) { /* unavailable */ }
+  }
+
+  function closeOcr() { ocrText = null; ocrError = null; }
+
+  // ── Long screenshot: hand the chosen region (physical px) back to App ──
+  function confirmScrollRegion() {
+    const scaleX = screenshotWidth / window.innerWidth;
+    const scaleY = screenshotHeight / window.innerHeight;
+    onscroll?.({
+      x: Math.round(sel.x * scaleX),
+      y: Math.round(sel.y * scaleY),
+      w: Math.round(sel.w * scaleX),
+      h: Math.round(sel.h * scaleY),
+    });
+  }
+
   function compositeImage(): Promise<{ data: string; width: number; height: number }> {
     return new Promise((resolve, reject) => {
       const img = new Image();
@@ -878,7 +930,17 @@
     <Magnifier screenshotSrc={bgSrc} mouseX={mx} mouseY={my} color={pickedColor} copied={colorCopied} />
   {/if}
 
-  {#if hasSel && !selecting}
+  {#if scrollMode && hasSel && !selecting}
+    <!-- Long-screenshot: confirm the region, then scroll-capture begins -->
+    <div class="fixed left-1/2 -translate-x-1/2 z-50" style="top:{sel.y + sel.h + 10 > window.innerHeight - 50 ? sel.y - 46 : sel.y + sel.h + 10}px;">
+      <button
+        class="flex items-center gap-1.5 px-3 py-1.5 text-sm text-white rounded-lg font-medium shadow-2xl"
+        style="background: var(--accent); animation: snapx-pop-in 0.16s var(--ease) both;"
+        onmousedown={(e) => e.stopPropagation()}
+        onclick={confirmScrollRegion}
+      >📜 开始长截图 (Enter)</button>
+    </div>
+  {:else if hasSel && !selecting}
     <Toolbar
       selX={sel.x} selY={sel.y} selW={sel.w} selH={sel.h}
       {phase} {activeTool} color={activeColor} strokeWidth={activeStroke}
@@ -896,6 +958,7 @@
       onTextBgToggle={() => textBg = !textBg}
       onUndo={undo}
       onRedo={redo}
+      onOcr={runOcr}
       onCopy={() => doExport('copy')}
       onSave={() => doExport('save')}
       onQuickSave={() => doExport('quicksave')}
@@ -938,6 +1001,51 @@
       <div class="bg-black/60 text-white/70 px-4 py-1.5 rounded-full text-xs backdrop-blur-sm">
         S选择 R矩形 E椭圆 A箭头 L直线 T文字 P画笔 M马赛克 H高亮 N序号 X橡皮
         · Ctrl+Z/Y 撤销/重做 · Del 删除选中 · Enter 复制 · ESC 返回
+      </div>
+    </div>
+  {/if}
+
+  <!-- OCR busy / result panel -->
+  {#if ocrBusy || ocrText !== null || ocrError}
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div
+      class="fixed inset-0 z-[60] flex items-center justify-center bg-black/40"
+      style="animation: snapx-fade-in 0.12s ease both;"
+      onmousedown={(e) => { e.stopPropagation(); if (e.target === e.currentTarget) closeOcr(); }}
+    >
+      <div
+        class="w-[min(560px,90vw)] max-h-[70vh] flex flex-col rounded-xl overflow-hidden border border-white/10 shadow-2xl"
+        style="background: var(--glass-bg); animation: snapx-pop-in 0.16s var(--ease) both;"
+      >
+        <div class="flex items-center gap-2 px-4 py-2.5 border-b border-white/10">
+          <span class="text-white/90 text-sm font-medium">文字识别 (OCR)</span>
+          <div class="flex-1"></div>
+          {#if ocrText}
+            <button
+              class="text-xs px-2.5 py-1 rounded-md text-white font-medium transition-colors"
+              style="background: var(--accent);"
+              onclick={copyOcrText}
+            >{ocrCopied ? '已复制' : '复制全部'}</button>
+          {/if}
+          <button
+            class="w-7 h-7 rounded-md text-white/60 hover:text-white hover:bg-white/10 transition-colors"
+            onclick={closeOcr}
+            aria-label="关闭"
+          >✕</button>
+        </div>
+        <div class="flex-1 overflow-auto p-4">
+          {#if ocrBusy}
+            <div class="text-white/60 text-sm text-center py-6">识别中…</div>
+          {:else if ocrError}
+            <div class="text-red-300/90 text-sm text-center py-6">{ocrError}</div>
+          {:else if ocrText}
+            <textarea
+              class="w-full h-full min-h-[160px] bg-black/30 text-white/90 text-sm rounded-lg p-3 resize-none outline-none border border-white/10 font-mono leading-relaxed"
+              readonly
+              onmousedown={(e) => e.stopPropagation()}
+            >{ocrText}</textarea>
+          {/if}
+        </div>
       </div>
     </div>
   {/if}
