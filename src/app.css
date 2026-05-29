@@ -15,3 +15,31 @@ html, body, #app {
 .capture-cursor {
   cursor: crosshair;
 }
+
+/* ── Design tokens ──────────────────────────────────────────────────
+   Shared by the capture overlay UI and the floating windows so colours,
+   radii and motion stay consistent. Glass surfaces are theme-independent
+   (they sit over a screenshot); window chrome follows the OS theme. */
+:root {
+  --accent: #3b82f6;
+  --accent-hover: #2b8fff;
+  --accent-soft: rgba(59, 130, 246, 0.25);
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+
+  --glass-bg: rgba(30, 30, 30, 0.92);
+  --glass-border: rgba(255, 255, 255, 0.1);
+  --glass-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+}
+
+/* Shared motion */
+@keyframes snapx-pop-in {
+  from { opacity: 0; transform: translateY(6px) scale(0.97); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes snapx-fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}

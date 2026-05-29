@@ -130,6 +130,7 @@ pub fn run() {
             commands::save_to_quicksave,
             commands::read_clipboard_image,
             commands::list_monitors,
+            commands::list_windows,
             commands::store_pin_data,
             commands::get_pin_data,
             commands::remove_pin_data,

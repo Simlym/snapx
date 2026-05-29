@@ -1,7 +1,7 @@
 {
   "identifier": "default",
   "description": "Capability for all SnapX windows",
-  "windows": ["main", "overlay", "pin-*"],
+  "windows": ["main", "overlay", "pin-*", "quick-*"],
   "permissions": [
     "core:default",
     "core:window:allow-create",
@@ -14,6 +14,8 @@
     "core:window:allow-set-position",
     "core:window:allow-center",
     "core:window:allow-primary-monitor",
+    "core:window:allow-current-monitor",
+    "core:window:allow-outer-size",
     "core:window:allow-set-always-on-top",
     "core:window:allow-set-decorations",
     "core:window:allow-start-dragging",
