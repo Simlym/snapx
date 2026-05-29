@@ -21,6 +21,7 @@
     onTextBgToggle?: () => void;
     onUndo?: () => void;
     onRedo?: () => void;
+    onOcr?: () => void;
     onCopy?: () => void;
     onSave?: () => void;
     onQuickSave?: () => void;
@@ -33,7 +34,7 @@
     phase, activeTool, color, strokeWidth, fillMode, textBg, canUndo, canRedo,
     onAnnotate, onToolChange, onColorChange, onStrokeWidthChange,
     onFillToggle, onTextBgToggle,
-    onUndo, onRedo, onCopy, onSave, onQuickSave, onPin, onCancel,
+    onUndo, onRedo, onOcr, onCopy, onSave, onQuickSave, onPin, onCancel,
   }: Props = $props();
 
   const PRESET_COLORS = [
@@ -213,6 +214,17 @@
     {/if}
 
     <!-- ── Actions ── -->
+    <button
+      class="flex items-center gap-1 px-2 py-1 text-xs text-gray-200 hover:bg-white/10 rounded-lg transition-colors font-medium"
+      title="提取文字 (OCR)"
+      onclick={onOcr}
+    >
+      <svg class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+        <path d="M4 7V4h16v3M9 20h6M12 4v16"/>
+      </svg>
+      取字
+    </button>
+
     <button
       class="flex items-center gap-1 px-2 py-1 text-xs text-white bg-blue-500 hover:bg-blue-600 rounded-lg transition-colors font-medium"
       title="复制到剪贴板 (Enter)"

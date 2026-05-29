@@ -27,6 +27,14 @@
   let screenshotData   = $state<string | null>(null);
   let screenshotWidth  = $state(0);
   let screenshotHeight = $state(0);
+  let overlayScrollMode = $state(false);
+
+  // ── Long-screenshot (scroll capture) state, runs in the main window ──
+  let scrollActive = $state(false);
+  let scrollRegion: { x: number; y: number; w: number; h: number } | null = null;
+  let scrollFrames = $state(0);
+  let scrollHeight = $state(0);
+  let scrollBusy = $state(false);
 
   // ── Delay-capture countdown ────────────────────────────────────────
   let countdown = $state<number | null>(null);
@@ -121,16 +129,23 @@
         await handlePastePin();
       });
       unlisteners.push(ul2);
+
+      const ul4 = await listen<{ x: number; y: number; w: number; h: number }>(
+        'scroll-start',
+        async (event) => { await beginScrollSession(event.payload); }
+      );
+      unlisteners.push(ul4);
     }
 
     if (isOverlay) {
-      const ul3 = await listen<{ image_data: string; width: number; height: number }>(
+      const ul3 = await listen<{ image_data: string; width: number; height: number; scroll?: boolean }>(
         'show-overlay',
         async (event) => {
-          screenshotData   = event.payload.image_data;
-          screenshotWidth  = event.payload.width;
-          screenshotHeight = event.payload.height;
-          overlayVisible   = true;
+          screenshotData    = event.payload.image_data;
+          screenshotWidth   = event.payload.width;
+          screenshotHeight  = event.payload.height;
+          overlayScrollMode = event.payload.scroll === true;
+          overlayVisible    = true;
         }
       );
       unlisteners.push(ul3);
@@ -173,6 +188,7 @@
           image_data: result.image_data,
           width: result.width,
           height: result.height,
+          scroll: mode === 'scroll',
         });
         // Fullscreen transition only on the very first capture; afterwards the
         // window stays fullscreen (just hidden), so show() is instant.
@@ -326,7 +342,71 @@
     await currentWindow.setFocus();
   }
 
-  async function onCancel() { await hideOverlay(); }
+  // Long screenshot: overlay (in its own window) selected a region → tell the
+  // main window to run the scroll-capture session, then hide the overlay.
+  async function onScrollRegion(region: { x: number; y: number; w: number; h: number }) {
+    try {
+      const { WebviewWindow } = await import('@tauri-apps/api/webviewWindow');
+      const mainWin = await WebviewWindow.getByLabel('main');
+      await mainWin?.emit('scroll-start', region);
+    } catch (e) { console.error('scroll-start emit failed:', e); }
+    await hideOverlay();
+  }
+
+  // Begin a scroll-capture session (runs in the main window).
+  async function beginScrollSession(region: { x: number; y: number; w: number; h: number }) {
+    scrollRegion = region;
+    scrollFrames = 0;
+    scrollHeight = 0;
+    scrollActive = true;
+    try {
+      await invoke('scroll_begin');
+    } catch (e) { console.error('scroll_begin failed:', e); }
+    await currentWindow.show();
+    await currentWindow.setFocus();
+    // Capture the first frame immediately.
+    await captureScrollFrame();
+  }
+
+  // Capture one frame of the selected region and feed it to the stitcher.
+  async function captureScrollFrame() {
+    if (!scrollRegion || scrollBusy) return;
+    scrollBusy = true;
+    try {
+      const r = scrollRegion;
+      const res = await invoke<{ image_data: string }>('capture_region', {
+        monitorIndex: 0, x: r.x, y: r.y, width: r.w, height: r.h,
+      });
+      scrollHeight = await invoke<number>('scroll_add_frame', { imageData: res.image_data });
+      scrollFrames += 1;
+    } catch (e) { console.error('scroll frame failed:', e); }
+    finally { scrollBusy = false; }
+  }
+
+  // Finish the session → stitched long image becomes a pin.
+  async function finishScrollSession() {
+    scrollActive = false;
+    try {
+      const res = await invoke<{ image_data: string; width: number; height: number }>('scroll_finish');
+      await currentWindow.hide();
+      await onPin(res.image_data, res.width, res.height);
+    } catch (e) { console.error('scroll_finish failed:', e); await currentWindow.hide(); }
+    scrollRegion = null;
+  }
+
+  async function cancelScrollSession() {
+    scrollActive = false;
+    scrollRegion = null;
+    try { await invoke('scroll_finish'); } catch (_) { /* discard */ }
+    await currentWindow.hide();
+  }
+
+  async function onCancel() {
+    if (overlayScrollMode) {
+      // Cancelled region selection in scroll mode — nothing to clean up.
+    }
+    await hideOverlay();
+  }
 
   async function hideOverlay() {
     overlayVisible = false;
@@ -347,11 +427,13 @@
     {screenshotData}
     {screenshotWidth}
     {screenshotHeight}
+    scrollMode={overlayScrollMode}
     oncopy={onCopy}
     onsave={onSave}
     onquicksave={onQuickSave}
     onpin={onPin}
     oncancel={onCancel}
+    onscroll={onScrollRegion}
   />
 {/if}
 
@@ -376,6 +458,38 @@
     <div class="text-white text-center">
       <div class="text-9xl font-bold tabular-nums leading-none drop-shadow-2xl">{countdown}</div>
       <div class="text-white/60 text-lg mt-4">秒后截图…</div>
+    </div>
+  </div>
+{/if}
+
+<!-- Long-screenshot control bar (shown in main window during a scroll session) -->
+{#if isMain && scrollActive}
+  <div class="fixed inset-0 flex items-center justify-center" style="background: var(--surface, #1a1a1a);">
+    <div class="text-center text-white space-y-5 px-8">
+      <div class="text-lg font-medium">长截图捕获中</div>
+      <div class="text-sm text-white/60 max-w-xs mx-auto leading-relaxed">
+        切换到目标窗口向下滚动一屏，回到这里点「捕获下一帧」。重复直到内容到底，再点「完成」。
+      </div>
+      <div class="flex items-center justify-center gap-6 text-sm">
+        <div><span class="text-white/50">帧数</span> <span class="font-mono font-semibold">{scrollFrames}</span></div>
+        <div><span class="text-white/50">高度</span> <span class="font-mono font-semibold">{scrollHeight}px</span></div>
+      </div>
+      <div class="flex items-center justify-center gap-3 pt-2">
+        <button
+          class="px-4 py-2 rounded-lg text-white font-medium transition-transform active:scale-95 disabled:opacity-50"
+          style="background: var(--accent, #3b82f6);"
+          onclick={captureScrollFrame}
+          disabled={scrollBusy}
+        >{scrollBusy ? '捕获中…' : '捕获下一帧'}</button>
+        <button
+          class="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-medium transition-transform active:scale-95"
+          onclick={finishScrollSession}
+        >完成</button>
+        <button
+          class="px-4 py-2 rounded-lg text-white/60 hover:text-white hover:bg-white/10 transition-colors"
+          onclick={cancelScrollSession}
+        >取消</button>
+      </div>
     </div>
   </div>
 {/if}
