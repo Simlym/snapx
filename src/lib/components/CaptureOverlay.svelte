@@ -48,6 +48,55 @@
   // ── Mouse tracking (magnifier) ────────────────────────────────────
   let mx = $state(0), my = $state(0);
 
+  // ── Eyedropper (colour under cursor) ──────────────────────────────
+  // An offscreen canvas holds the full screenshot so we can read the exact
+  // pixel colour under the cursor while choosing a region (Snipaste-style).
+  // Built lazily on first sample so the capture path stays fast.
+  let pickedColor = $state('');
+  let colorCopied = $state(false);
+  let sampleCanvas: HTMLCanvasElement | null = null;
+  let sampleCtx: CanvasRenderingContext2D | null = null;
+  let sampleImg: HTMLImageElement | null = null;
+
+  function ensureSampleCanvas() {
+    if (sampleCtx || sampleImg) return;
+    sampleImg = new Image();
+    sampleImg.onload = () => {
+      const c = document.createElement('canvas');
+      c.width = screenshotWidth;
+      c.height = screenshotHeight;
+      const ctx = c.getContext('2d', { willReadFrequently: true });
+      if (ctx) {
+        ctx.drawImage(sampleImg!, 0, 0, screenshotWidth, screenshotHeight);
+        sampleCanvas = c;
+        sampleCtx = ctx;
+      }
+    };
+    sampleImg.src = bgSrc;
+  }
+
+  function sampleColorAt(clientX: number, clientY: number) {
+    ensureSampleCanvas();
+    if (!sampleCtx) return;
+    const scaleX = screenshotWidth / window.innerWidth;
+    const scaleY = screenshotHeight / window.innerHeight;
+    const px = Math.max(0, Math.min(screenshotWidth - 1, Math.round(clientX * scaleX)));
+    const py = Math.max(0, Math.min(screenshotHeight - 1, Math.round(clientY * scaleY)));
+    try {
+      const d = sampleCtx.getImageData(px, py, 1, 1).data;
+      pickedColor = '#' + [d[0], d[1], d[2]].map((v) => v.toString(16).padStart(2, '0')).join('');
+    } catch (_) { /* not ready */ }
+  }
+
+  async function copyPickedColor() {
+    if (!pickedColor) return;
+    try {
+      await navigator.clipboard.writeText(pickedColor);
+      colorCopied = true;
+      setTimeout(() => (colorCopied = false), 900);
+    } catch (_) { /* clipboard unavailable */ }
+  }
+
   // ── Annotation state ───────────────────────────────────────────────
   let activeTool: ToolType = $state('rect');
   let activeColor = $state('#ef4444');
@@ -180,6 +229,12 @@
       if (phase === 'annotating') { doExport('copy'); return; }
     }
 
+    // Eyedropper: copy the colour under the cursor while still choosing a region.
+    if (phase === 'selecting' && e.key.toLowerCase() === 'c' && !e.ctrlKey && !e.metaKey) {
+      copyPickedColor();
+      return;
+    }
+
     if (phase === 'annotating') {
       if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'z') { e.preventDefault(); undo(); return; }
       if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === 'y' || (e.shiftKey && e.key.toLowerCase() === 'z'))) {
@@ -242,6 +297,7 @@
   }
   function selMove(e: MouseEvent) {
     mx = e.clientX; my = e.clientY;
+    sampleColorAt(e.clientX, e.clientY);
     if (selecting) { cx = e.clientX; cy = e.clientY; }
   }
   function selUp() { selecting = false; }
@@ -753,7 +809,7 @@
   {/if}
 
   {#if phase === 'selecting'}
-    <Magnifier screenshotSrc={bgSrc} mouseX={mx} mouseY={my} />
+    <Magnifier screenshotSrc={bgSrc} mouseX={mx} mouseY={my} color={pickedColor} copied={colorCopied} />
   {/if}
 
   {#if hasSel && !selecting}

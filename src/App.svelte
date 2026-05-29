@@ -12,6 +12,7 @@
   import CaptureOverlay from './lib/components/CaptureOverlay.svelte';
   import PinWindow from './lib/components/PinWindow.svelte';
   import SettingsPanel from './lib/components/SettingsPanel.svelte';
+  import QuickAccess from './lib/components/QuickAccess.svelte';
 
   const currentWindow = getCurrentWindow();
   const windowLabel: string = currentWindow.label;
@@ -19,6 +20,7 @@
   const isOverlay = windowLabel === 'overlay';
   const isMain    = windowLabel === 'main';
   const isPin     = windowLabel.startsWith('pin-');
+  const isQuick   = windowLabel.startsWith('quick-');
 
   // ── Overlay state ──────────────────────────────────────────────────
   let overlayVisible   = $state(false);
@@ -32,8 +34,18 @@
   // ── Pin state ──────────────────────────────────────────────────────
   let pinImageData = $state<string | null>(null);
 
+  // ── Quick-access (post-capture corner floater) state ───────────────
+  let quickImageData = $state<string | null>(null);
+  let quickW = $state(0);
+  let quickH = $state(0);
+
   // ── Settings state ─────────────────────────────────────────────────
   let settingsVisible = $state(false);
+
+  // Overlay is switched to fullscreen only once, then kept fullscreen across
+  // captures (we just show/hide it). This skips the costly per-capture
+  // fullscreen transition — the single biggest win for perceived speed.
+  let overlayFullscreenSet = false;
 
   let unlisteners: UnlistenFn[] = [];
 
@@ -51,6 +63,25 @@
             await sizeAndShowPin(parsed.width, parsed.height);
           }
         } catch (e) { console.error('Failed to load pin data:', e); }
+      }
+      return;
+    }
+
+    if (isQuick) {
+      const params = new URLSearchParams(window.location.search);
+      const id = params.get('id');
+      if (id) {
+        try {
+          const raw = await invoke<string | null>('get_pin_data', { id });
+          if (raw) {
+            const p = JSON.parse(raw) as { data: string; width: number; height: number };
+            quickImageData = p.data;
+            quickW = p.width;
+            quickH = p.height;
+            await invoke('remove_pin_data', { id });
+            await positionQuickAccess();
+          }
+        } catch (e) { console.error('Failed to load quick data:', e); }
       }
       return;
     }
@@ -121,7 +152,10 @@
         mode = 'region';
       }
 
-      await new Promise((r) => setTimeout(r, 250));
+      // Small settle so a freshly-closed tray menu isn't caught in the frame.
+      // Down from 250ms → 80ms for a snappier capture; kept as a timeout (not
+      // rAF) because this runs in the hidden main window where rAF is throttled.
+      await new Promise((r) => setTimeout(r, 80));
 
       const result = await invoke<{ image_data: string; width: number; height: number; monitor_id: number }>(
         'capture_screens', { monitorIndex: 0 }
@@ -140,9 +174,14 @@
           width: result.width,
           height: result.height,
         });
+        // Fullscreen transition only on the very first capture; afterwards the
+        // window stays fullscreen (just hidden), so show() is instant.
+        if (!overlayFullscreenSet) {
+          await overlayWin.setFullscreen(true);
+          overlayFullscreenSet = true;
+        }
         await overlayWin.show();
         await overlayWin.setFocus();
-        await overlayWin.setFullscreen(true);
       }
     } catch (err) {
       countdown = null;
@@ -176,6 +215,7 @@
     try { await invoke('save_to_clipboard', { imageData }); }
     catch (err) { console.error('Clipboard write failed:', err); }
     await hideOverlay();
+    showQuickAccess(imageData);
   }
 
   async function onSave(imageData: string) {
@@ -190,6 +230,53 @@
       const path = await invoke<string>('save_to_quicksave', { imageData });
       console.log('Quick saved to:', path);
     } catch (err) { console.error('Quick save failed:', err); }
+    showQuickAccess(imageData);
+  }
+
+  // Spawn the post-capture corner floater. Disabled via a localStorage flag.
+  async function showQuickAccess(imageData: string) {
+    if (localStorage.getItem('snapx-quickaccess') === 'off') return;
+    try {
+      const dims = await new Promise<{ w: number; h: number }>((res) => {
+        const im = new Image();
+        im.onload = () => res({ w: im.naturalWidth, h: im.naturalHeight });
+        im.onerror = () => res({ w: 0, h: 0 });
+        im.src = `data:image/png;base64,${imageData}`;
+      });
+      const id = crypto.randomUUID();
+      await invoke('store_pin_data', {
+        id,
+        data: JSON.stringify({ data: imageData, width: dims.w, height: dims.h }),
+      });
+      const { WebviewWindow } = await import('@tauri-apps/api/webviewWindow');
+      new WebviewWindow(`quick-${Date.now()}`, {
+        url: `/?win=quick&id=${encodeURIComponent(id)}`,
+        title: 'SnapX',
+        width: 280, height: 188,
+        decorations: false, transparent: true,
+        alwaysOnTop: true, skipTaskbar: true,
+        resizable: false, shadow: false, visible: false,
+      });
+    } catch (e) { console.error('Quick access failed:', e); }
+  }
+
+  // Pin the quick-access window to the bottom-right of its current monitor.
+  async function positionQuickAccess() {
+    const { PhysicalPosition, currentMonitor, primaryMonitor } =
+      await import('@tauri-apps/api/window');
+    try {
+      const mon = (await currentMonitor()) ?? (await primaryMonitor());
+      const size = await currentWindow.outerSize();
+      if (mon) {
+        const margin = Math.round(24 * mon.scaleFactor);
+        const taskbar = Math.round(56 * mon.scaleFactor);
+        const x = mon.position.x + mon.size.width - size.width - margin;
+        const y = mon.position.y + mon.size.height - size.height - taskbar;
+        await currentWindow.setPosition(new PhysicalPosition(x, y));
+      }
+    } catch (e) { console.error('Quick position failed:', e); }
+    await currentWindow.show();
+    await currentWindow.setFocus();
   }
 
   // pxW/pxH are the composite image's *physical* pixel dimensions.
@@ -244,7 +331,8 @@
   async function hideOverlay() {
     overlayVisible = false;
     screenshotData = null;
-    await currentWindow.setFullscreen(false);
+    // Keep the window fullscreen (just hide it) so the next capture skips the
+    // fullscreen transition entirely.
     await currentWindow.hide();
   }
 
@@ -269,6 +357,10 @@
 
 {#if isPin && pinImageData}
   <PinWindow imageData={pinImageData} />
+{/if}
+
+{#if isQuick && quickImageData}
+  <QuickAccess imageData={quickImageData} width={quickW} height={quickH} />
 {/if}
 
 {#if isMain && settingsVisible}
