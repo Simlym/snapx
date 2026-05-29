@@ -24,6 +24,20 @@ pub struct CaptureResult {
     pub monitor_id: u32,
 }
 
+/// A window's bounds, translated into monitor-local physical pixels so the
+/// frontend can map them onto the captured screenshot for edge detection /
+/// snap-to-window selection.
+#[derive(Debug, Serialize)]
+pub struct WindowInfo {
+    pub id: u32,
+    pub title: String,
+    pub app_name: String,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
 /// Encode an RGBA8 buffer to a base64 PNG using fast compression.
 /// Fast deflate + no row filtering trades a slightly larger file for a big
 /// drop in encode time — the right call for an interactive capture path.
@@ -74,6 +88,55 @@ pub fn capture_full_monitor(monitor_index: usize) -> Result<CaptureResult, Strin
         height,
         monitor_id: monitor_index as u32,
     })
+}
+
+/// Enumerate visible windows overlapping a monitor, with bounds expressed in
+/// that monitor's local physical pixels (origin at the monitor's top-left).
+/// Ordered front-to-back is not guaranteed by xcap; we return them in z-order
+/// as reported and let the frontend pick the smallest window under the cursor.
+pub fn list_windows_for_monitor(monitor_index: usize) -> Result<Vec<WindowInfo>, String> {
+    let monitors = xcap::Monitor::all().map_err(|e| e.to_string())?;
+    let monitor = monitors
+        .get(monitor_index)
+        .ok_or_else(|| "Monitor not found".to_string())?;
+    let (mx, my) = (monitor.x(), monitor.y());
+    let (mw, mh) = (monitor.width() as i32, monitor.height() as i32);
+
+    let windows = xcap::Window::all().map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for w in windows {
+        if w.is_minimized() {
+            continue;
+        }
+        // Skip SnapX's own windows (overlay/pins) so they don't get detected.
+        if w.app_name().eq_ignore_ascii_case("snapx")
+            || w.title().starts_with("SnapX")
+        {
+            continue;
+        }
+        let ww = w.width() as i32;
+        let wh = w.height() as i32;
+        if ww <= 0 || wh <= 0 {
+            continue;
+        }
+        // Local coordinates relative to the monitor's top-left.
+        let lx = w.x() - mx;
+        let ly = w.y() - my;
+        // Skip windows that don't overlap this monitor at all.
+        if lx + ww <= 0 || ly + wh <= 0 || lx >= mw || ly >= mh {
+            continue;
+        }
+        out.push(WindowInfo {
+            id: w.id(),
+            title: w.title().to_string(),
+            app_name: w.app_name().to_string(),
+            x: lx,
+            y: ly,
+            width: w.width(),
+            height: w.height(),
+        });
+    }
+    Ok(out)
 }
 
 /// Capture a region of a specific monitor

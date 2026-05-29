@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { invoke } from '@tauri-apps/api/core';
+  import { onMount } from 'svelte';
   import Magnifier from './Magnifier.svelte';
   import SizeIndicator from './SizeIndicator.svelte';
   import Toolbar from './Toolbar.svelte';
@@ -95,6 +97,42 @@
       colorCopied = true;
       setTimeout(() => (colorCopied = false), 900);
     } catch (_) { /* clipboard unavailable */ }
+  }
+
+  // ── Window edge detection (snap-to-window) ────────────────────────
+  // Window bounds come from Rust in monitor-local *physical* px; we convert to
+  // viewport (CSS) px to overlay them on the displayed screenshot. Before any
+  // drag, hovering highlights the smallest window under the cursor; clicking it
+  // (without dragging) snaps the selection to that window — Snipaste-style.
+  interface WinRect { x: number; y: number; w: number; h: number; }
+  let windowRects: WinRect[] = [];
+  let hoveredWindow = $state<WinRect | null>(null);
+
+  onMount(async () => {
+    try {
+      const wins = await invoke<
+        { x: number; y: number; width: number; height: number }[]
+      >('list_windows', { monitorIndex: 0 });
+      const sx = window.innerWidth / screenshotWidth;
+      const sy = window.innerHeight / screenshotHeight;
+      windowRects = wins.map((w) => ({
+        x: w.x * sx, y: w.y * sy, w: w.width * sx, h: w.height * sy,
+      }));
+    } catch (e) {
+      // Window enumeration is best-effort; selection still works without it.
+      console.warn('list_windows unavailable:', e);
+    }
+  });
+
+  // Smallest window whose bounds contain the point — the most specific target.
+  function windowAt(px: number, py: number): WinRect | null {
+    let best: WinRect | null = null;
+    for (const r of windowRects) {
+      if (px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h) {
+        if (!best || r.w * r.h < best.w * best.h) best = r;
+      }
+    }
+    return best;
   }
 
   // ── Annotation state ───────────────────────────────────────────────
@@ -289,18 +327,38 @@
   }
 
   // ── SELECTING phase handlers ───────────────────────────────────────
+  let selDownX = 0, selDownY = 0, selDragged = false;
   function selDown(e: MouseEvent) {
     if (e.button !== 0) return;
     selecting = true;
+    selDragged = false;
+    selDownX = e.clientX; selDownY = e.clientY;
     ox = e.clientX; oy = e.clientY;
     cx = e.clientX; cy = e.clientY;
   }
   function selMove(e: MouseEvent) {
     mx = e.clientX; my = e.clientY;
     sampleColorAt(e.clientX, e.clientY);
-    if (selecting) { cx = e.clientX; cy = e.clientY; }
+    if (selecting) {
+      cx = e.clientX; cy = e.clientY;
+      if (Math.hypot(e.clientX - selDownX, e.clientY - selDownY) > 3) selDragged = true;
+    } else {
+      // Hover edge-detection before any drag begins.
+      hoveredWindow = windowAt(e.clientX, e.clientY);
+    }
   }
-  function selUp() { selecting = false; }
+  function selUp() {
+    // Click without dragging → snap the selection to the hovered window.
+    if (selecting && !selDragged) {
+      const win = windowAt(selDownX, selDownY);
+      if (win) {
+        ox = win.x; oy = win.y;
+        cx = win.x + win.w; cy = win.y + win.h;
+      }
+    }
+    selecting = false;
+    hoveredWindow = null;
+  }
   function selDblClick() {
     ox = 0; oy = 0;
     cx = window.innerWidth; cy = window.innerHeight;
@@ -690,6 +748,14 @@
       fill={phase === 'annotating' ? 'rgba(0,0,0,0.25)' : 'rgba(0,0,0,0.52)'}
       mask="url(#dim-mask)" />
 
+    <!-- Hovered window outline (snap-to-window edge detection) -->
+    {#if phase === 'selecting' && !selecting && !hasSel && hoveredWindow}
+      <rect x={hoveredWindow.x} y={hoveredWindow.y}
+        width={hoveredWindow.w} height={hoveredWindow.h}
+        fill="rgba(59,130,246,0.12)" stroke="rgba(59,130,246,0.9)"
+        stroke-width="1.5" stroke-dasharray="6 3" />
+    {/if}
+
     {#if hasSel}
       <rect x={sel.x} y={sel.y} width={sel.w} height={sel.h}
         fill="none"
@@ -861,8 +927,8 @@
   {#if !hasSel && !selecting}
     <div class="absolute inset-0 flex items-center justify-center pointer-events-none">
       <div class="bg-black/70 text-white px-6 py-3 rounded-xl text-sm backdrop-blur-sm space-y-1 text-center">
-        <div>拖拽选择截图区域 · 双击全屏</div>
-        <div class="text-white/50 text-xs">右键 / ESC 取消</div>
+        <div>拖拽选择 · 单击窗口自动识别 · 双击全屏</div>
+        <div class="text-white/50 text-xs">移动鼠标取色，按 C 复制 · 右键 / ESC 取消</div>
       </div>
     </div>
   {/if}

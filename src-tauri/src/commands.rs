@@ -43,6 +43,13 @@ pub async fn list_monitors() -> Result<Vec<capture::MonitorInfo>, String> {
     Ok(capture::get_monitor_list())
 }
 
+/// List visible windows on a monitor with monitor-local physical-pixel bounds,
+/// used by the overlay for hover edge-detection and snap-to-window selection.
+#[tauri::command]
+pub async fn list_windows(monitor_index: Option<usize>) -> Result<Vec<capture::WindowInfo>, String> {
+    capture::list_windows_for_monitor(monitor_index.unwrap_or(0))
+}
+
 // ── Clipboard / file commands ─────────────────────────────────────────────────
 
 #[tauri::command]
