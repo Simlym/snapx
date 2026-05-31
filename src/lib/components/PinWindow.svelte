@@ -1,6 +1,7 @@
 <script lang="ts">
   import { getCurrentWindow } from '@tauri-apps/api/window';
-  import { listen } from '@tauri-apps/api/event';
+  import { listen, emit } from '@tauri-apps/api/event';
+  import { invoke } from '@tauri-apps/api/core';
   import { onMount } from 'svelte';
 
   interface Props { imageData: string; }
@@ -15,6 +16,47 @@
   let scale = $state(1.0);
   let alwaysOnTop = $state(true);
 
+  // ── Right-click context menu ───────────────────────────────────────
+  let menuOpen = $state(false);
+  let menuX = $state(0);
+  let menuY = $state(0);
+  let toast = $state<string | null>(null);
+  let toastTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function flash(msg: string) {
+    toast = msg;
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => (toast = null), 1100);
+  }
+
+  function onContextMenu(e: MouseEvent) {
+    e.preventDefault();
+    // Clamp so the menu stays inside the window.
+    const mw = 168, mh = 232;
+    menuX = Math.min(e.clientX, window.innerWidth - mw - 6);
+    menuY = Math.min(e.clientY, window.innerHeight - mh - 6);
+    menuOpen = true;
+  }
+
+  function closeMenu() { menuOpen = false; }
+
+  async function copyImage() {
+    closeMenu();
+    try { await invoke('save_to_clipboard', { imageData }); flash('已复制'); }
+    catch (err) { console.error('Copy failed:', err); flash('复制失败'); }
+  }
+
+  async function saveImage() {
+    closeMenu();
+    try { await invoke('save_to_file_dialog', { imageData }); }
+    catch (err) { console.error('Save failed:', err); }
+  }
+
+  async function closeAllPins() {
+    closeMenu();
+    await emit('close-all-pins');
+  }
+
   function onMouseEnter() {
     if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; }
     showControls = true;
@@ -24,6 +66,8 @@
   }
 
   async function startDrag(e: MouseEvent) {
+    if (e.button !== 0) return; // left button only — right opens the menu
+    if (menuOpen) { closeMenu(); return; }
     if ((e.target as HTMLElement).closest('[data-controls]')) return;
     e.preventDefault();
     await currentWindow.startDragging();
@@ -43,7 +87,7 @@
   }
 
   function onKeyDown(e: KeyboardEvent) {
-    if (e.key === 'Escape') closeWindow();
+    if (e.key === 'Escape') { if (menuOpen) closeMenu(); else closeWindow(); }
   }
 
   onMount(() => {
@@ -59,6 +103,7 @@
   class="fixed inset-0 overflow-hidden select-none"
   style="opacity:{opacity / 100}"
   onmousedown={startDrag}
+  oncontextmenu={onContextMenu}
   onmouseenter={onMouseEnter}
   onmouseleave={onMouseLeave}
   onwheel={onWheel}
@@ -68,7 +113,7 @@
     alt="pinned screenshot"
     class="w-full h-full object-fill pointer-events-none block"
     draggable={false}
-    style="transform:scale({scale});transform-origin:center;box-shadow:0 2px 20px rgba(0,0,0,0.6);"
+    style="transform:scale({scale});transform-origin:center;box-shadow:0 2px 20px rgba(0,0,0,0.6);outline:1px solid rgba(124,109,243,0.9);outline-offset:-1px;"
   />
 
   {#if showControls}
@@ -124,4 +169,74 @@
       </div>
     </div>
   {/if}
+
+  <!-- Toast -->
+  {#if toast}
+    <div class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 pointer-events-none z-[60]">
+      <div class="bg-black/75 text-white text-xs font-medium px-3 py-1.5 rounded-lg backdrop-blur-sm">
+        {toast}
+      </div>
+    </div>
+  {/if}
+
+  <!-- Right-click context menu -->
+  {#if menuOpen}
+    <!-- Backdrop swallows the next click to dismiss the menu -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div
+      class="fixed inset-0 z-[70]"
+      onmousedown={(e) => { e.stopPropagation(); closeMenu(); }}
+      oncontextmenu={(e) => { e.preventDefault(); closeMenu(); }}
+    ></div>
+
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div
+      data-controls=""
+      class="fixed z-[71] min-w-[160px] py-1 rounded-lg bg-[#26262b]/95 backdrop-blur-md border border-white/10 shadow-2xl text-sm text-white/90 select-none"
+      style="left:{menuX}px; top:{menuY}px;"
+      onmousedown={(e) => e.stopPropagation()}
+      oncontextmenu={(e) => e.preventDefault()}
+    >
+      <button class="menu-item" onclick={copyImage}>
+        <span class="menu-ico">📋</span>复制图片
+      </button>
+      <button class="menu-item" onclick={saveImage}>
+        <span class="menu-ico">💾</span>保存为文件…
+      </button>
+
+      <div class="my-1 border-t border-white/10"></div>
+
+      <button class="menu-item" onclick={() => { closeMenu(); toggleAlwaysOnTop(); }}>
+        <span class="menu-ico">📌</span>{alwaysOnTop ? '取消置顶' : '置顶显示'}
+      </button>
+
+      <div class="my-1 border-t border-white/10"></div>
+
+      <button class="menu-item menu-danger" onclick={() => { closeMenu(); closeWindow(); }}>
+        <span class="menu-ico">🗑️</span>销毁此贴图
+      </button>
+      <button class="menu-item menu-danger" onclick={closeAllPins}>
+        <span class="menu-ico">❌</span>关闭全部贴图
+      </button>
+    </div>
+  {/if}
 </div>
+
+<style>
+  .menu-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 6px 12px;
+    text-align: left;
+    background: transparent;
+    border: none;
+    color: inherit;
+    cursor: pointer;
+    transition: background 0.1s;
+  }
+  .menu-item:hover { background: rgba(124, 109, 243, 0.85); color: #fff; }
+  .menu-danger:hover { background: rgba(239, 68, 68, 0.85); }
+  .menu-ico { width: 16px; text-align: center; font-size: 12px; }
+</style>

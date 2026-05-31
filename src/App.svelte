@@ -176,16 +176,19 @@
   ): Promise<{ data: string; width: number; height: number } | null> {
     const t0 = performance.now();
     try {
-      // The overlay's dim mask must NOT be baked into the grab. xcap captures
-      // the real desktop including this transparent window, so we hide it for
-      // the duration of the capture, then bring it straight back.
-      await currentWindow.hide();
+      // No window hide/show: that 260ms disappear→reappear was the visible
+      // "flash". The selecting phase now draws NO full-screen dim, so the only
+      // overlay pixels xcap could bake in are the thin selection chrome (border,
+      // grips, size indicator, toolbar). The overlay hides those for the duration
+      // of the grab via its `capturing` flag — see CaptureOverlay. We just wait
+      // two frames here so that hide is actually painted before we capture.
+      await new Promise<void>((r) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => r()))
+      );
       const result = await invoke<{ image_data: string; width: number; height: number }>(
         'capture_region',
         { monitorIndex: 0, x: region.x, y: region.y, width: region.w, height: region.h }
       );
-      await currentWindow.show();
-      await currentWindow.setFocus();
       perf(`[overlay] captureForSelection (region ${region.w}x${region.h}): +${(performance.now() - t0).toFixed(0)}ms (${(result.image_data.length / 1024).toFixed(0)}KB)`);
       screenshotData   = result.image_data;
       screenshotWidth  = result.width;

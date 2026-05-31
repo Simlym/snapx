@@ -7,10 +7,14 @@
   import type { ToolType } from './Toolbar.svelte';
 
   // ── Annotation types ───────────────────────────────────────────────
+  // Shared line-style traits live on the relevant shapes so each annotation
+  // remembers how it was drawn (dashed vs solid, rounded corners, arrowheads).
+  type LineStyle = 'solid' | 'dashed';
+  type ArrowStyle = 'end' | 'both' | 'none';
   interface AnnBase       { id: string; color: string; sw: number; }
-  interface BoxAnn        extends AnnBase { type: 'rect' | 'ellipse'; x: number; y: number; w: number; h: number; fill: boolean; }
-  interface ArrowAnn      extends AnnBase { type: 'arrow'; x1: number; y1: number; x2: number; y2: number; }
-  interface LineAnn       extends AnnBase { type: 'line';  x1: number; y1: number; x2: number; y2: number; }
+  interface BoxAnn        extends AnnBase { type: 'rect' | 'ellipse'; x: number; y: number; w: number; h: number; fill: boolean; dash: LineStyle; round: boolean; }
+  interface ArrowAnn      extends AnnBase { type: 'arrow'; x1: number; y1: number; x2: number; y2: number; dash: LineStyle; head: ArrowStyle; }
+  interface LineAnn       extends AnnBase { type: 'line';  x1: number; y1: number; x2: number; y2: number; dash: LineStyle; }
   interface PenAnn        extends AnnBase { type: 'pen'; pts: [number, number][]; }
   interface TextAnn       extends AnnBase { type: 'text'; x: number; y: number; text: string; bg: boolean; }
   interface MosaicAnn     extends AnnBase { type: 'mosaic'; x: number; y: number; w: number; h: number; }
@@ -161,6 +165,12 @@
   let activeStroke = $state(3);
   let fillMode = $state(false);
   let textBg = $state(false);
+  // Line-style traits, applied to newly drawn shapes (see annDown).
+  let lineStyle: LineStyle = $state('solid');
+  let roundCorners = $state(false);
+  let arrowStyle: ArrowStyle = $state('end');
+  // Tools whose stroke width can be tuned with the mouse wheel.
+  const HAS_STROKE = new Set<ToolType>(['rect','ellipse','arrow','line','text','pen','counter']);
   let counterNum = $state(1);
   let annotations: Annotation[] = $state([]);
   let undoStack: Annotation[][] = $state([]);
@@ -269,6 +279,99 @@
       if (hid === 'p2') return { ...origAnn, x2: curMx, y2: curMy };
     }
     return origAnn;
+  }
+
+  // ── Apply a style change to the selected annotation (live, WYSIWYG) ──
+  // When the select tool has something selected, style edits (stroke, colour,
+  // dash, round, fill, arrow head, text bg) are written straight onto that
+  // annotation so the user sees the result immediately. Each call is one undo
+  // step. Returns true if a selected annotation was patched.
+  function patchSelected(patch: Partial<Annotation>): boolean {
+    if (!selectedId) return false;
+    const cur = annotations.find(a => a.id === selectedId);
+    if (!cur) return false;
+    pushUndo();
+    annotations = annotations.map(a =>
+      a.id === selectedId ? ({ ...a, ...patch } as Annotation) : a
+    );
+    return true;
+  }
+
+  // Switch a selected annotation between sibling shapes that share geometry:
+  // rect ⇄ ellipse (box-based) and arrow ⇄ line (segment-based). Carries over
+  // position/size, colour, stroke and any compatible traits.
+  function switchSelectedShape(to: 'rect' | 'ellipse' | 'arrow' | 'line') {
+    if (!selectedId) return;
+    const cur = annotations.find(a => a.id === selectedId);
+    if (!cur) return;
+    let next: Annotation | null = null;
+    if ((cur.type === 'rect' || cur.type === 'ellipse') && (to === 'rect' || to === 'ellipse')) {
+      next = { ...cur, type: to };
+    } else if ((cur.type === 'arrow' || cur.type === 'line') && (to === 'arrow' || to === 'line')) {
+      if (to === 'arrow') {
+        // line → arrow: add a head (default 'end').
+        next = { ...(cur as LineAnn), type: 'arrow', head: arrowStyle } as ArrowAnn;
+      } else {
+        // arrow → line: drop the head field.
+        const { head: _drop, ...rest } = cur as ArrowAnn;
+        next = { ...rest, type: 'line' } as LineAnn;
+      }
+    }
+    if (!next) return;
+    pushUndo();
+    annotations = annotations.map(a => (a.id === selectedId ? next! : a));
+    // The panel reflects the SELECTED annotation's type (styleType), so it
+    // updates automatically — no need to touch activeTool (which would also
+    // risk clearing the selection via onToolChange downstream).
+  }
+
+  // ── Mouse wheel: adjust brush/stroke size while annotating ─────────
+  // Scroll up = thicker, down = thinner. Targeting (in priority order):
+  //   1. the annotation directly under the cursor (hover) — WYSIWYG resize,
+  //   2. the currently selected annotation,
+  //   3. otherwise the active tool's size for the *next* shape.
+  // Live-resizing an existing annotation mutates its `sw` directly and folds
+  // a continuous scroll gesture into a single undo step.
+  let wheelUndoTimer: ReturnType<typeof setTimeout> | null = null;
+  function resizeAnnSw(id: string, delta: number) {
+    const cur = annotations.find(a => a.id === id);
+    if (!cur) return;
+    const nw = Math.max(1, Math.min(20, cur.sw + delta));
+    if (nw === cur.sw) return;
+    // Push one undo entry at the start of a scroll burst, then coalesce the
+    // rest until the user pauses (300ms) — so a flick of the wheel is one undo.
+    if (!wheelUndoTimer) pushUndo();
+    if (wheelUndoTimer) clearTimeout(wheelUndoTimer);
+    wheelUndoTimer = setTimeout(() => { wheelUndoTimer = null; }, 300);
+    annotations = annotations.map(a =>
+      a.id === id ? ({ ...a, sw: nw } as Annotation) : a
+    );
+    activeStroke = nw;
+  }
+  function onWheel(e: WheelEvent) {
+    if (phase !== 'annotating') return;
+    const delta = e.deltaY < 0 ? 1 : -1;
+
+    // 1) Annotation under the cursor wins (no need to pick the select tool).
+    const hovered = [...annotations].reverse().find(a => hitTest(a, e.clientX, e.clientY));
+    if (hovered && hovered.type !== 'mosaic' && hovered.type !== 'highlight') {
+      e.preventDefault();
+      resizeAnnSw(hovered.id, delta);
+      return;
+    }
+    // 2) Fall back to the selected annotation.
+    if (selectedId) {
+      const sel = annotations.find(a => a.id === selectedId);
+      if (sel && sel.type !== 'mosaic' && sel.type !== 'highlight') {
+        e.preventDefault();
+        resizeAnnSw(selectedId, delta);
+        return;
+      }
+    }
+    // 3) Otherwise set the size for the next shape.
+    if (!HAS_STROKE.has(activeTool)) return;
+    e.preventDefault();
+    activeStroke = Math.max(1, Math.min(20, activeStroke + delta));
   }
 
   // ── Keyboard ───────────────────────────────────────────────────────
@@ -566,11 +669,11 @@
     const base = { id: crypto.randomUUID(), color: activeColor, sw: activeStroke };
 
     if (activeTool === 'rect' || activeTool === 'ellipse') {
-      currentAnn = { ...base, type: activeTool, x: e.clientX, y: e.clientY, w: 0, h: 0, fill: fillMode };
+      currentAnn = { ...base, type: activeTool, x: e.clientX, y: e.clientY, w: 0, h: 0, fill: fillMode, dash: lineStyle, round: roundCorners };
     } else if (activeTool === 'arrow') {
-      currentAnn = { ...base, type: 'arrow', x1: e.clientX, y1: e.clientY, x2: e.clientX, y2: e.clientY };
+      currentAnn = { ...base, type: 'arrow', x1: e.clientX, y1: e.clientY, x2: e.clientX, y2: e.clientY, dash: lineStyle, head: arrowStyle };
     } else if (activeTool === 'line') {
-      currentAnn = { ...base, type: 'line', x1: e.clientX, y1: e.clientY, x2: e.clientX, y2: e.clientY };
+      currentAnn = { ...base, type: 'line', x1: e.clientX, y1: e.clientY, x2: e.clientX, y2: e.clientY, dash: lineStyle };
     } else if (activeTool === 'pen') {
       currentAnn = { ...base, type: 'pen', pts: [[e.clientX, e.clientY]] };
     } else if (activeTool === 'mosaic') {
@@ -681,17 +784,22 @@
   }
 
   // ── Arrow path helper ──────────────────────────────────────────────
-  function arrowD(x1: number, y1: number, x2: number, y2: number, sw: number): string {
+  // `head` controls which ends get an arrowhead: 'end' (at x2), 'both', or
+  // 'none' (a plain shaft, i.e. degenerates to a line).
+  function arrowD(x1: number, y1: number, x2: number, y2: number, sw: number, head: ArrowStyle = 'end'): string {
     const dx = x2 - x1, dy = y2 - y1;
     if (Math.hypot(dx, dy) < 2) return '';
     const ang = Math.atan2(dy, dx);
     const hl = Math.max(12, sw * 4);
-    const a1 = ang - Math.PI / 6, a2 = ang + Math.PI / 6;
-    return [
-      `M${x1},${y1}L${x2},${y2}`,
-      `M${x2},${y2}L${x2 - hl * Math.cos(a1)},${y2 - hl * Math.sin(a1)}`,
-      `M${x2},${y2}L${x2 - hl * Math.cos(a2)},${y2 - hl * Math.sin(a2)}`,
-    ].join(' ');
+    const parts = [`M${x1},${y1}L${x2},${y2}`];
+    const tip = (tx: number, ty: number, a: number) => {
+      const a1 = a - Math.PI / 6, a2 = a + Math.PI / 6;
+      parts.push(`M${tx},${ty}L${tx - hl * Math.cos(a1)},${ty - hl * Math.sin(a1)}`);
+      parts.push(`M${tx},${ty}L${tx - hl * Math.cos(a2)},${ty - hl * Math.sin(a2)}`);
+    };
+    if (head === 'end' || head === 'both') tip(x2, y2, ang);
+    if (head === 'both') tip(x1, y1, ang + Math.PI);
+    return parts.join(' ');
   }
 
   // ── Canvas mosaic helper ───────────────────────────────────────────
@@ -808,10 +916,18 @@
           ctx.lineWidth = ann.sw * scaleX;
           ctx.lineCap = 'round';
           ctx.lineJoin = 'round';
+          // Dashed line style (shared by rect/ellipse/arrow/line).
+          const dashed = (ann.type === 'rect' || ann.type === 'ellipse' ||
+                          ann.type === 'arrow' || ann.type === 'line') && ann.dash === 'dashed';
+          ctx.setLineDash(dashed ? [ann.sw * scaleX * 3, ann.sw * scaleX * 2.2] : []);
 
           if (ann.type === 'rect') {
-            if (ann.fill) ctx.fillRect(tx(ann.x), ty(ann.y), ann.w * scaleX, ann.h * scaleY);
-            else ctx.strokeRect(tx(ann.x), ty(ann.y), ann.w * scaleX, ann.h * scaleY);
+            const rx = tx(ann.x), ry = ty(ann.y), rw = ann.w * scaleX, rh = ann.h * scaleY;
+            const rad = ann.round ? Math.min(rw, rh) * 0.18 : 0;
+            ctx.beginPath();
+            if (rad > 0 && typeof ctx.roundRect === 'function') ctx.roundRect(rx, ry, rw, rh, rad);
+            else ctx.rect(rx, ry, rw, rh);
+            if (ann.fill) ctx.fill(); else ctx.stroke();
           } else if (ann.type === 'ellipse') {
             ctx.beginPath();
             ctx.ellipse(
@@ -825,11 +941,16 @@
             const ang = Math.atan2(ay2 - ay1, ax2 - ax1);
             const hl = Math.max(12, ann.sw * 4) * scaleX;
             ctx.beginPath(); ctx.moveTo(ax1, ay1); ctx.lineTo(ax2, ay2); ctx.stroke();
-            ctx.beginPath();
-            ctx.moveTo(ax2, ay2);
-            ctx.lineTo(ax2 - hl * Math.cos(ang - Math.PI / 6), ay2 - hl * Math.sin(ang - Math.PI / 6));
-            ctx.lineTo(ax2 - hl * Math.cos(ang + Math.PI / 6), ay2 - hl * Math.sin(ang + Math.PI / 6));
-            ctx.closePath(); ctx.fill();
+            ctx.setLineDash([]);
+            const drawTip = (tipX: number, tipY: number, a: number) => {
+              ctx.beginPath();
+              ctx.moveTo(tipX, tipY);
+              ctx.lineTo(tipX - hl * Math.cos(a - Math.PI / 6), tipY - hl * Math.sin(a - Math.PI / 6));
+              ctx.lineTo(tipX - hl * Math.cos(a + Math.PI / 6), tipY - hl * Math.sin(a + Math.PI / 6));
+              ctx.closePath(); ctx.fill();
+            };
+            if (ann.head === 'end' || ann.head === 'both') drawTip(ax2, ay2, ang);
+            if (ann.head === 'both') drawTip(ax1, ay1, ang + Math.PI);
           } else if (ann.type === 'line') {
             ctx.beginPath(); ctx.moveTo(tx(ann.x1), ty(ann.y1)); ctx.lineTo(tx(ann.x2), ty(ann.y2)); ctx.stroke();
           } else if (ann.type === 'pen') {
@@ -912,6 +1033,7 @@
   onmousedown={phase === 'selecting' ? selDown : annDown}
   onmousemove={phase === 'selecting' ? selMove : annMove}
   onmouseup={phase === 'selecting' ? selUp : annUp}
+  onwheel={onWheel}
   ondblclick={phase === 'selecting' ? selDblClick : undefined}
   oncontextmenu={(e) => {
     e.preventDefault();
@@ -926,7 +1048,7 @@
     <img
       src={bgSrc} alt=""
       class="absolute object-fill pointer-events-none"
-      style="left:{sel.x}px; top:{sel.y}px; width:{sel.w}px; height:{sel.h}px;"
+      style="left:{sel.x}px; top:{sel.y}px; width:{sel.w}px; height:{sel.h}px; animation: snapx-fade-in 0.14s ease both;"
       draggable={false}
     />
   {/if}
@@ -948,9 +1070,14 @@
       </pattern>
     </defs>
 
-    <rect x="0" y="0" width="100%" height="100%"
-      fill={phase === 'annotating' ? 'rgba(0,0,0,0.25)' : 'rgba(0,0,0,0.52)'}
-      mask="url(#dim-mask)" />
+    <!-- Dim only during annotating (subtle, makes the crop pop). The selecting
+         phase has NO dim: the overlay is fully transparent over the live desktop,
+         so the deferred capture can grab clean pixels without hiding the window. -->
+    {#if phase === 'annotating'}
+      <rect x="0" y="0" width="100%" height="100%"
+        fill="rgba(0,0,0,0.25)" mask="url(#dim-mask)"
+        style="animation: snapx-fade-in 0.14s ease both;" />
+    {/if}
 
     <!-- Hovered window outline (snap-to-window edge detection) -->
     {#if phase === 'selecting' && !selecting && !hasSel && hoveredWindow}
@@ -961,13 +1088,17 @@
     {/if}
 
     {#if hasSel}
-      <rect x={sel.x} y={sel.y} width={sel.w} height={sel.h}
+      <!-- Border sits 1px OUTSIDE the selection rect so its stroke never lands
+           inside the capture region — the grab stays clean and the border can
+           stay painted right through the capture (no flicker on commit). -->
+      <rect x={sel.x - 1.5} y={sel.y - 1.5} width={sel.w + 3} height={sel.h + 3}
         fill="none"
         stroke={phase === 'annotating' ? '#3b82f6' : 'rgba(59,130,246,0.9)'}
         stroke-width="2" />
-      {#if phase === 'selecting'}
+      {#if phase === 'selecting' && !capturing}
         <!-- 8 resize grips (corners + edge midpoints). Drag any to resize, or
-             drag inside the box to move it — handled in selDown/selMove. -->
+             drag inside the box to move it — handled in selDown/selMove.
+             Hidden during the grab so they don't bake into the crop. -->
         {#each selHandles() as h}
           <rect x={h.x - 4} y={h.y - 4} width="8" height="8"
             fill={hoveredSelHandle === h.id ? 'rgba(59,130,246,0.95)' : 'white'}
@@ -981,10 +1112,13 @@
         {#if ann.type === 'rect'}
           {#if ann.fill}
             <rect x={ann.x} y={ann.y} width={ann.w} height={ann.h}
+              rx={ann.round ? Math.min(ann.w, ann.h) * 0.18 : 0}
               fill={ann.color} opacity={preview ? 0.55 : 1} />
           {:else}
             <rect x={ann.x} y={ann.y} width={ann.w} height={ann.h}
+              rx={ann.round ? Math.min(ann.w, ann.h) * 0.18 : 0}
               fill="none" stroke={ann.color} stroke-width={ann.sw}
+              stroke-dasharray={ann.dash === 'dashed' ? `${ann.sw * 3} ${ann.sw * 2.2}` : 'none'}
               stroke-linecap="round" stroke-linejoin="round" opacity={preview ? 0.65 : 1} />
           {/if}
         {:else if ann.type === 'ellipse'}
@@ -995,15 +1129,19 @@
           {:else}
             <ellipse cx={ann.x + ann.w / 2} cy={ann.y + ann.h / 2}
               rx={Math.max(0, ann.w / 2)} ry={Math.max(0, ann.h / 2)}
-              fill="none" stroke={ann.color} stroke-width={ann.sw} opacity={preview ? 0.65 : 1} />
+              fill="none" stroke={ann.color} stroke-width={ann.sw}
+              stroke-dasharray={ann.dash === 'dashed' ? `${ann.sw * 3} ${ann.sw * 2.2}` : 'none'}
+              opacity={preview ? 0.65 : 1} />
           {/if}
         {:else if ann.type === 'arrow'}
-          <path d={arrowD(ann.x1, ann.y1, ann.x2, ann.y2, ann.sw)}
+          <path d={arrowD(ann.x1, ann.y1, ann.x2, ann.y2, ann.sw, ann.head)}
             stroke={ann.color} fill={ann.color} stroke-width={ann.sw}
+            stroke-dasharray={ann.dash === 'dashed' ? `${ann.sw * 3} ${ann.sw * 2.2}` : 'none'}
             stroke-linecap="round" stroke-linejoin="round" opacity={preview ? 0.65 : 1} />
         {:else if ann.type === 'line'}
           <line x1={ann.x1} y1={ann.y1} x2={ann.x2} y2={ann.y2}
             stroke={ann.color} stroke-width={ann.sw}
+            stroke-dasharray={ann.dash === 'dashed' ? `${ann.sw * 3} ${ann.sw * 2.2}` : 'none'}
             stroke-linecap="round" opacity={preview ? 0.65 : 1} />
         {:else if ann.type === 'pen'}
           <polyline points={ann.pts.map(([px, py]) => `${px},${py}`).join(' ')}
@@ -1077,7 +1215,7 @@
     </g>
   </svg>
 
-  {#if phase === 'selecting' && hasSel}
+  {#if phase === 'selecting' && hasSel && !capturing}
     <SizeIndicator x={sel.x} y={sel.y} width={sel.w} height={sel.h} />
   {/if}
 
@@ -1101,7 +1239,9 @@
     <Toolbar
       selX={sel.x} selY={sel.y} selW={sel.w} selH={sel.h}
       {phase} {activeTool} color={activeColor} strokeWidth={activeStroke}
-      {fillMode} {textBg}
+      {fillMode} {textBg} {lineStyle} {roundCorners} {arrowStyle}
+      styleType={selectedAnn?.type ?? activeTool}
+      hasSelection={selectedAnn !== null}
       canUndo={undoStack.length > 0} canRedo={redoStack.length > 0}
       onAnnotate={enterAnnotating}
       onToolChange={(t) => {
@@ -1109,10 +1249,26 @@
         if (phase === 'selecting') enterAnnotating();
         if (t !== 'select') selectedId = null;
       }}
-      onColorChange={(c) => activeColor = c}
-      onStrokeWidthChange={(w) => activeStroke = w}
-      onFillToggle={() => fillMode = !fillMode}
-      onTextBgToggle={() => textBg = !textBg}
+      onColorChange={(c) => { activeColor = c; patchSelected({ color: c }); }}
+      onStrokeWidthChange={(w) => { activeStroke = w; patchSelected({ sw: w }); }}
+      onFillToggle={() => {
+        fillMode = !fillMode;
+        if (selectedAnn && (selectedAnn.type === 'rect' || selectedAnn.type === 'ellipse'))
+          patchSelected({ fill: fillMode });
+      }}
+      onTextBgToggle={() => {
+        textBg = !textBg;
+        if (selectedAnn?.type === 'text') patchSelected({ bg: textBg });
+      }}
+      onLineStyleChange={(s) => { lineStyle = s; patchSelected({ dash: s }); }}
+      onRoundToggle={() => {
+        roundCorners = !roundCorners;
+        if (selectedAnn?.type === 'rect') patchSelected({ round: roundCorners });
+      }}
+      onArrowStyleChange={(s) => {
+        arrowStyle = s;
+        if (selectedAnn?.type === 'arrow') patchSelected({ head: s });
+      }}
       onUndo={undo}
       onRedo={redo}
       onOcr={runOcr}
