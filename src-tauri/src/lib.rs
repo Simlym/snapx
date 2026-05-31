@@ -3,13 +3,25 @@ use std::sync::Mutex;
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::TrayIconBuilder,
-    Emitter, Manager,
+    AppHandle, Emitter, Manager,
 };
 
 mod capture;
 mod commands;
 mod ocr;
 mod stitch;
+
+/// Show the selection overlay *immediately* and tell it to begin selecting in
+/// the given mode. No screenshot is taken here — the overlay sits transparent
+/// over the live desktop and captures the full screen itself only once the user
+/// commits a region. This is what makes the trigger feel instant.
+fn start_selection(app: &AppHandle, mode: &str) {
+    if let Some(overlay) = app.get_webview_window("overlay") {
+        let _ = overlay.show();
+        let _ = overlay.set_focus();
+        let _ = overlay.emit("start-selection", mode);
+    }
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -54,24 +66,12 @@ pub fn run() {
                 .on_menu_event(move |app_handle, event| {
                     let ah = app_handle.clone();
                     match event.id().as_ref() {
-                        "capture" => {
-                            tauri::async_runtime::spawn(async move {
-                                let _ = ah.emit("trigger-capture", "region");
-                            });
-                        }
-                        "capture-window" => {
-                            tauri::async_runtime::spawn(async move {
-                                let _ = ah.emit("trigger-capture", "window");
-                            });
-                        }
+                        "capture" => start_selection(&ah, "region"),
+                        "capture-window" => start_selection(&ah, "region"),
+                        "capture-scroll" => start_selection(&ah, "scroll"),
                         "capture-fullscreen" => {
                             tauri::async_runtime::spawn(async move {
                                 let _ = ah.emit("trigger-capture", "fullscreen");
-                            });
-                        }
-                        "capture-scroll" => {
-                            tauri::async_runtime::spawn(async move {
-                                let _ = ah.emit("trigger-capture", "scroll");
                             });
                         }
                         "capture-delay-2" => {
@@ -112,10 +112,8 @@ pub fn run() {
             let shortcut_for_state = shortcut.clone();
             let _ = app.global_shortcut().unregister(shortcut.clone());
             if let Err(e) = app.global_shortcut().on_shortcut(shortcut, |app_handle, _event, _shortcut| {
-                let ah = app_handle.clone();
-                tauri::async_runtime::spawn(async move {
-                    let _ = ah.emit("trigger-capture", "region");
-                });
+                eprintln!("[perf] global shortcut fired → show overlay");
+                start_selection(app_handle, "region");
             }) {
                 eprintln!("Warning: failed to register global shortcut: {e}");
             }
@@ -148,6 +146,7 @@ pub fn run() {
             commands::get_pin_data,
             commands::remove_pin_data,
             commands::update_global_shortcut,
+            commands::perf_log,
         ])
         .run(tauri::generate_context!())
         .expect("error while running SnapX");

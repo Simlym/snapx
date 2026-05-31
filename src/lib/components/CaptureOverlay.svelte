@@ -21,7 +21,9 @@
 
   // ── Props ──────────────────────────────────────────────────────────
   interface Props {
-    screenshotData: string;
+    /** Null during the selecting phase — the overlay is transparent over the
+     *  live desktop and only grabs the screenshot once a region is committed. */
+    screenshotData: string | null;
     screenshotWidth: number;
     screenshotHeight: number;
     oncopy?: (imageData: string) => void;
@@ -32,14 +34,21 @@
     /** Long-screenshot mode: emits the chosen region in physical pixels. */
     scrollMode?: boolean;
     onscroll?: (region: { x: number; y: number; w: number; h: number }) => void;
+    /** Grab ONLY the given region (physical px) on demand, called when the user
+     *  commits. Resolves with the cropped screenshot, or null on failure. */
+    captureForSelection?: (
+      region: { x: number; y: number; w: number; h: number }
+    ) => Promise<{ data: string; width: number; height: number } | null>;
   }
 
   let {
-    screenshotData, screenshotWidth, screenshotHeight,
+    screenshotData = $bindable(null),
+    screenshotWidth = $bindable(0),
+    screenshotHeight = $bindable(0),
     oncopy, onsave, onquicksave, onpin, oncancel,
-    scrollMode = false, onscroll,
+    scrollMode = false, onscroll, captureForSelection,
   }: Props = $props();
-  let bgSrc = $derived(`data:image/png;base64,${screenshotData}`);
+  let bgSrc = $derived(screenshotData ? `data:image/png;base64,${screenshotData}` : '');
 
   // ── Phase ──────────────────────────────────────────────────────────
   let phase: 'selecting' | 'annotating' = $state('selecting');
@@ -68,6 +77,8 @@
   let sampleImg: HTMLImageElement | null = null;
 
   function ensureSampleCanvas() {
+    // No screenshot during the selecting phase → eyedropper is disabled.
+    if (!screenshotData) return;
     if (sampleCtx || sampleImg) return;
     sampleImg = new Image();
     sampleImg.onload = () => {
@@ -120,10 +131,12 @@
       const wins = await invoke<
         { x: number; y: number; width: number; height: number }[]
       >('list_windows', { monitorIndex: 0 });
-      const sx = window.innerWidth / screenshotWidth;
-      const sy = window.innerHeight / screenshotHeight;
+      // Window bounds come back in monitor-local *physical* px. We have no
+      // screenshot yet (capture is deferred), so convert to CSS px via the
+      // device pixel ratio — which equals this monitor's scale factor.
+      const dpr = window.devicePixelRatio || 1;
       windowRects = wins.map((w) => ({
-        x: w.x * sx, y: w.y * sy, w: w.width * sx, h: w.height * sy,
+        x: w.x / dpr, y: w.y / dpr, w: w.width / dpr, h: w.height / dpr,
       }));
     } catch (e) {
       // Window enumeration is best-effort; selection still works without it.
@@ -303,7 +316,40 @@
     }
   }
 
-  function enterAnnotating() { phase = 'annotating'; }
+  // Grab the full-monitor screenshot on demand and wait until it's available.
+  // No-op if we already have it. This is the deferred capture: it runs the
+  // first time the user does anything that needs real pixels (enter annotating,
+  // copy, save, pin, OCR) — never at trigger time. Returns false on failure.
+  let capturing = $state(false);
+  async function ensureScreenshot(): Promise<boolean> {
+    if (screenshotData) return true;
+    if (!captureForSelection || !hasSel) return false;
+    capturing = true;
+    try {
+      // Convert the (final) selection from CSS px to monitor-local physical px
+      // so Rust crops exactly the region the user framed.
+      const dpr = window.devicePixelRatio || 1;
+      const region = {
+        x: Math.round(sel.x * dpr), y: Math.round(sel.y * dpr),
+        w: Math.round(sel.w * dpr), h: Math.round(sel.h * dpr),
+      };
+      const res = await captureForSelection(region);
+      if (!res) return false;
+      // Parent owns the state; mirror it locally so this component re-derives
+      // bgSrc and the scale factors immediately.
+      screenshotData   = res.data;
+      screenshotWidth  = res.width;
+      screenshotHeight = res.height;
+      return true;
+    } finally {
+      capturing = false;
+    }
+  }
+
+  async function enterAnnotating() {
+    if (!(await ensureScreenshot())) return;
+    phase = 'annotating';
+  }
 
   function backToSelecting() {
     phase = 'selecting';
@@ -336,28 +382,104 @@
 
   // ── SELECTING phase handlers ───────────────────────────────────────
   let selDownX = 0, selDownY = 0, selDragged = false;
+  // How an in-progress drag mutates the selection. 'new' = rubber-band a fresh
+  // rect; 'move' = translate the whole selection; a HandleId = resize from that
+  // grip. Lets the user tweak a committed selection (Snipaste-style) before
+  // capturing — capture is still deferred until an action button is hit.
+  type SelMode = 'new' | 'move' | HandleId;
+  let selMode: SelMode = 'new';
+  // Snapshot of the selection rect + pointer at drag start, for move/resize.
+  let dragStart = { x: 0, y: 0, w: 0, h: 0, mx: 0, my: 0 };
+  // Which grip (if any) the cursor is hovering over an existing selection.
+  let hoveredSelHandle = $state<HandleId | null>(null);
+
+  const HANDLE_HIT = 9; // px radius around a grip that counts as a hit
+
+  // Grip positions for the current selection, in viewport px.
+  function selHandles(): { id: HandleId; x: number; y: number }[] {
+    const { x, y, w, h } = sel;
+    return [
+      { id: 'tl', x,         y },         { id: 'tc', x: x + w / 2, y },         { id: 'tr', x: x + w, y },
+      { id: 'ml', x,         y: y + h/2 },                                       { id: 'mr', x: x + w, y: y + h/2 },
+      { id: 'bl', x,         y: y + h },  { id: 'bc', x: x + w / 2, y: y + h },  { id: 'br', x: x + w, y: y + h },
+    ];
+  }
+  function selHandleAt(px: number, py: number): HandleId | null {
+    if (!hasSel) return null;
+    for (const h of selHandles()) {
+      if (Math.hypot(px - h.x, py - h.y) <= HANDLE_HIT) return h.id;
+    }
+    return null;
+  }
+  function insideSel(px: number, py: number): boolean {
+    return hasSel && px >= sel.x && px <= sel.x + sel.w && py >= sel.y && py <= sel.y + sel.h;
+  }
+
   function selDown(e: MouseEvent) {
     if (e.button !== 0) return;
     selecting = true;
     selDragged = false;
     selDownX = e.clientX; selDownY = e.clientY;
-    ox = e.clientX; oy = e.clientY;
-    cx = e.clientX; cy = e.clientY;
+
+    // Decide what this drag does based on where it started, relative to any
+    // existing selection: on a grip → resize; inside → move; else → new rect.
+    const grip = selHandleAt(e.clientX, e.clientY);
+    if (grip) {
+      selMode = grip;
+    } else if (insideSel(e.clientX, e.clientY)) {
+      selMode = 'move';
+    } else {
+      selMode = 'new';
+    }
+
+    if (selMode === 'new') {
+      ox = e.clientX; oy = e.clientY;
+      cx = e.clientX; cy = e.clientY;
+    } else {
+      // Normalize so (ox,oy)=top-left, (cx,cy)=bottom-right, then snapshot.
+      ox = sel.x; oy = sel.y; cx = sel.x + sel.w; cy = sel.y + sel.h;
+      dragStart = { x: sel.x, y: sel.y, w: sel.w, h: sel.h, mx: e.clientX, my: e.clientY };
+    }
   }
+
   function selMove(e: MouseEvent) {
     mx = e.clientX; my = e.clientY;
     sampleColorAt(e.clientX, e.clientY);
-    if (selecting) {
+
+    if (!selecting) {
+      // Idle hover: show window edge-detection only when there's no committed
+      // selection; once a selection exists, surface its resize grips instead.
+      if (hasSel) {
+        hoveredSelHandle = selHandleAt(e.clientX, e.clientY);
+        hoveredWindow = null;
+      } else {
+        hoveredWindow = windowAt(e.clientX, e.clientY);
+      }
+      return;
+    }
+
+    if (Math.hypot(e.clientX - selDownX, e.clientY - selDownY) > 3) selDragged = true;
+
+    if (selMode === 'new') {
       cx = e.clientX; cy = e.clientY;
-      if (Math.hypot(e.clientX - selDownX, e.clientY - selDownY) > 3) selDragged = true;
+    } else if (selMode === 'move') {
+      const dx = e.clientX - dragStart.mx;
+      const dy = e.clientY - dragStart.my;
+      ox = dragStart.x + dx; oy = dragStart.y + dy;
+      cx = ox + dragStart.w;  cy = oy + dragStart.h;
     } else {
-      // Hover edge-detection before any drag begins.
-      hoveredWindow = windowAt(e.clientX, e.clientY);
+      // Resize from a grip. ox/oy = top-left, cx/cy = bottom-right.
+      const id = selMode;
+      if (id === 'tl' || id === 'ml' || id === 'bl') ox = e.clientX;
+      if (id === 'tr' || id === 'mr' || id === 'br') cx = e.clientX;
+      if (id === 'tl' || id === 'tc' || id === 'tr') oy = e.clientY;
+      if (id === 'bl' || id === 'bc' || id === 'br') cy = e.clientY;
     }
   }
+
   function selUp() {
-    // Click without dragging → snap the selection to the hovered window.
-    if (selecting && !selDragged) {
+    // Click without dragging on empty space → snap to the hovered window.
+    if (selecting && !selDragged && selMode === 'new') {
       const win = windowAt(selDownX, selDownY);
       if (win) {
         ox = win.x; oy = win.y;
@@ -365,12 +487,25 @@
       }
     }
     selecting = false;
+    selMode = 'new';
     hoveredWindow = null;
   }
+
   function selDblClick() {
     ox = 0; oy = 0;
     cx = window.innerWidth; cy = window.innerHeight;
     enterAnnotating();
+  }
+
+  // Cursor for the selecting phase: resize arrows over grips, move over the
+  // selection body, crosshair elsewhere.
+  function selCursorFor(id: HandleId | null, inside: boolean): string {
+    if (id === 'tl' || id === 'br') return 'nwse-resize';
+    if (id === 'tr' || id === 'bl') return 'nesw-resize';
+    if (id === 'tc' || id === 'bc') return 'ns-resize';
+    if (id === 'ml' || id === 'mr') return 'ew-resize';
+    if (inside) return 'move';
+    return 'crosshair';
   }
 
   // ── ANNOTATING phase handlers ─────────────────────────────────────
@@ -577,6 +712,7 @@
 
   // ── Export ─────────────────────────────────────────────────────────
   async function doExport(action: 'copy' | 'save' | 'quicksave' | 'pin') {
+    if (!(await ensureScreenshot())) return;
     const { data, width, height } = await compositeImage();
     if (action === 'copy')           oncopy?.(data);
     else if (action === 'save')      onsave?.(data);
@@ -591,6 +727,7 @@
   let ocrCopied = $state(false);
 
   async function runOcr() {
+    if (!(await ensureScreenshot())) return;
     ocrBusy = true;
     ocrError = null;
     try {
@@ -618,13 +755,14 @@
 
   // ── Long screenshot: hand the chosen region (physical px) back to App ──
   function confirmScrollRegion() {
-    const scaleX = screenshotWidth / window.innerWidth;
-    const scaleY = screenshotHeight / window.innerHeight;
+    // Scroll mode never captures a backdrop, so map CSS px → physical px via
+    // the device pixel ratio (this monitor's scale factor) for capture_region.
+    const dpr = window.devicePixelRatio || 1;
     onscroll?.({
-      x: Math.round(sel.x * scaleX),
-      y: Math.round(sel.y * scaleY),
-      w: Math.round(sel.w * scaleX),
-      h: Math.round(sel.h * scaleY),
+      x: Math.round(sel.x * dpr),
+      y: Math.round(sel.y * dpr),
+      w: Math.round(sel.w * dpr),
+      h: Math.round(sel.h * dpr),
     });
   }
 
@@ -633,20 +771,19 @@
       const img = new Image();
       img.onload = () => {
         const { x, y, w, h } = sel;
-        const scaleX = screenshotWidth / window.innerWidth;
-        const scaleY = screenshotHeight / window.innerHeight;
-        // Snap source crop to integer physical px. A fractional src origin
-        // (e.g. x*1.25 at 125% scaling) makes drawImage bilinearly resample the
-        // whole crop → soft image. Integer src rect + equal dst = 1:1 blit.
-        const sx = Math.round(x * scaleX);
-        const sy = Math.round(y * scaleY);
-        const pw = Math.round(w * scaleX);
-        const ph = Math.round(h * scaleY);
+        // screenshotData is already the cropped region (physical px). The crop's
+        // pixel size relative to the on-screen selection (CSS px) IS the scale
+        // factor — derive it from the image so it stays exact even at fractional
+        // DPI. The backdrop is drawn whole (no second crop).
+        const pw = screenshotWidth;
+        const ph = screenshotHeight;
+        const scaleX = pw / w;
+        const scaleY = ph / h;
         const canvas = document.createElement('canvas');
         canvas.width = pw; canvas.height = ph;
         const ctx = canvas.getContext('2d')!;
         ctx.imageSmoothingEnabled = false;
-        ctx.drawImage(img, sx, sy, pw, ph, 0, 0, pw, ph);
+        ctx.drawImage(img, 0, 0, pw, ph);
         ctx.imageSmoothingEnabled = true;
 
         const offX = x, offY = y;
@@ -741,7 +878,16 @@
 
   // ── Cursor ─────────────────────────────────────────────────────────
   let cursorStyle = $derived.by(() => {
-    if (phase === 'selecting') return 'crosshair';
+    if (phase === 'selecting') {
+      // While actively dragging, reflect the live drag mode; otherwise reflect
+      // what's under the cursor (grip / inside / empty).
+      if (selecting) {
+        if (selMode === 'move') return 'move';
+        if (selMode !== 'new') return selCursorFor(selMode, false);
+        return 'crosshair';
+      }
+      return selCursorFor(hoveredSelHandle, insideSel(mx, my));
+    }
     if (activeTool === 'text') return 'text';
     if (activeTool === 'eraser') return 'cell';
     if (activeTool === 'select') {
@@ -773,11 +919,17 @@
     else oncancel?.();
   }}
 >
-  <img
-    src={bgSrc} alt=""
-    class="absolute inset-0 w-full h-full object-fill pointer-events-none"
-    draggable={false}
-  />
+  <!-- Backdrop only exists once captured (annotating phase). It's the cropped
+       region, so position it exactly over the selection rect (1:1). During live
+       selection the overlay is transparent so the real desktop shows through. -->
+  {#if screenshotData}
+    <img
+      src={bgSrc} alt=""
+      class="absolute object-fill pointer-events-none"
+      style="left:{sel.x}px; top:{sel.y}px; width:{sel.w}px; height:{sel.h}px;"
+      draggable={false}
+    />
+  {/if}
 
   <svg class="absolute inset-0 w-full h-full pointer-events-none" overflow="visible">
     <defs>
@@ -814,9 +966,12 @@
         stroke={phase === 'annotating' ? '#3b82f6' : 'rgba(59,130,246,0.9)'}
         stroke-width="2" />
       {#if phase === 'selecting'}
-        {#each [[sel.x, sel.y], [sel.x + sel.w, sel.y], [sel.x, sel.y + sel.h], [sel.x + sel.w, sel.y + sel.h]] as [hx, hy]}
-          <rect x={hx! - 4} y={hy! - 4} width="8" height="8"
-            fill="white" stroke="rgba(59,130,246,0.9)" stroke-width="1.5" />
+        <!-- 8 resize grips (corners + edge midpoints). Drag any to resize, or
+             drag inside the box to move it — handled in selDown/selMove. -->
+        {#each selHandles() as h}
+          <rect x={h.x - 4} y={h.y - 4} width="8" height="8"
+            fill={hoveredSelHandle === h.id ? 'rgba(59,130,246,0.95)' : 'white'}
+            stroke="rgba(59,130,246,0.9)" stroke-width="1.5" />
         {/each}
       {/if}
     {/if}
@@ -926,7 +1081,9 @@
     <SizeIndicator x={sel.x} y={sel.y} width={sel.w} height={sel.h} />
   {/if}
 
-  {#if phase === 'selecting'}
+  {#if phase === 'selecting' && screenshotData}
+    <!-- Eyedropper/magnifier needs the captured bitmap, which only exists after
+         a region is committed → effectively disabled during live selection. -->
     <Magnifier screenshotSrc={bgSrc} mouseX={mx} mouseY={my} color={pickedColor} copied={colorCopied} />
   {/if}
 
@@ -991,7 +1148,7 @@
     <div class="absolute inset-0 flex items-center justify-center pointer-events-none">
       <div class="bg-black/70 text-white px-6 py-3 rounded-xl text-sm backdrop-blur-sm space-y-1 text-center">
         <div>拖拽选择 · 单击窗口自动识别 · 双击全屏</div>
-        <div class="text-white/50 text-xs">移动鼠标取色，按 C 复制 · 右键 / ESC 取消</div>
+        <div class="text-white/50 text-xs">右键 / ESC 取消</div>
       </div>
     </div>
   {/if}

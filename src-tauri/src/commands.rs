@@ -2,7 +2,7 @@ use crate::capture;
 use base64::Engine;
 use std::collections::HashMap;
 use std::sync::Mutex;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut};
 use image::GenericImageView;
 
@@ -15,6 +15,15 @@ pub struct CurrentShortcut(pub Mutex<Option<Shortcut>>);
 
 /// In-progress long-screenshot stitcher (one scroll session at a time).
 pub struct ScrollStitcher(pub Mutex<Option<crate::stitch::Stitcher>>);
+
+// ── Perf logging ────────────────────────────────────────────────────────────
+
+/// Funnel frontend timing logs into the same terminal stream as the Rust
+/// `[perf]` prints, so the full keypress→overlay chain is visible in one place.
+#[tauri::command]
+pub fn perf_log(msg: String) {
+    eprintln!("[perf][js] {msg}");
+}
 
 // ── Capture commands ──────────────────────────────────────────────────────────
 
@@ -309,10 +318,12 @@ pub fn update_global_shortcut(
 
     app.global_shortcut()
         .on_shortcut(new_shortcut, |ah, _event, _shortcut| {
-            let ah = ah.clone();
-            tauri::async_runtime::spawn(async move {
-                let _ = ah.emit("trigger-capture", "region");
-            });
+            eprintln!("[perf] global shortcut fired → show overlay");
+            if let Some(overlay) = ah.get_webview_window("overlay") {
+                let _ = overlay.show();
+                let _ = overlay.set_focus();
+                let _ = overlay.emit("start-selection", "region");
+            }
         })
         .map_err(|e| e.to_string())?;
 

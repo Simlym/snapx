@@ -32,7 +32,7 @@
   let {
     selX, selY, selW, selH,
     phase, activeTool, color, strokeWidth, fillMode, textBg, canUndo, canRedo,
-    onAnnotate, onToolChange, onColorChange, onStrokeWidthChange,
+    onToolChange, onColorChange, onStrokeWidthChange,
     onFillToggle, onTextBgToggle,
     onUndo, onRedo, onOcr, onCopy, onSave, onQuickSave, onPin, onCancel,
   }: Props = $props();
@@ -48,26 +48,52 @@
     { label: '粗', value: 7 },
   ];
 
-  const TOOLS: { type: ToolType; label: string; title: string }[] = [
-    { type: 'select',    label: '↖',  title: '选择/移动 (S)' },
-    { type: 'rect',      label: '▭',  title: '矩形 (R)' },
-    { type: 'ellipse',   label: '◯',  title: '椭圆 (E)' },
-    { type: 'arrow',     label: '↗',  title: '箭头 (A)' },
-    { type: 'line',      label: '╱',  title: '直线 (L)' },
-    { type: 'text',      label: 'T',  title: '文字 (T)' },
-    { type: 'pen',       label: '✏', title: '画笔 (P)' },
-    { type: 'mosaic',    label: '▒',  title: '马赛克 (M)' },
-    { type: 'highlight', label: '▨',  title: '高亮 (H)' },
-    { type: 'counter',   label: '①',  title: '序号 (N)' },
-    { type: 'eraser',    label: '⌫',  title: '橡皮擦 (X)' },
+  interface ToolDef { type: ToolType; label: string; title: string }
+
+  // Standalone buttons (always visible, no dropdown).
+  const SELECT_TOOL: ToolDef = { type: 'select', label: '↖', title: '选择/移动 (S)' };
+  const ERASER_TOOL: ToolDef = { type: 'eraser', label: '⌫', title: '橡皮擦 (X)' };
+
+  // Drawing tools grouped into dropdowns to keep the bar short.
+  const GROUPS: { name: string; tools: ToolDef[] }[] = [
+    { name: '形状', tools: [
+      { type: 'rect',    label: '▭', title: '矩形 (R)' },
+      { type: 'ellipse', label: '◯', title: '椭圆 (E)' },
+      { type: 'arrow',   label: '↗', title: '箭头 (A)' },
+      { type: 'line',    label: '╱', title: '直线 (L)' },
+    ]},
+    { name: '标记', tools: [
+      { type: 'text',      label: 'T',  title: '文字 (T)' },
+      { type: 'pen',       label: '✏', title: '画笔 (P)' },
+      { type: 'counter',   label: '①',  title: '序号 (N)' },
+      { type: 'highlight', label: '▨',  title: '高亮 (H)' },
+    ]},
+    { name: '遮掩', tools: [
+      { type: 'mosaic', label: '▒', title: '马赛克 (M)' },
+    ]},
   ];
 
-  // Show stroke/color controls for these tools
   const HAS_STYLE = new Set<ToolType>(['rect','ellipse','arrow','line','text','pen','mosaic','highlight','counter']);
-  // Show fill toggle for these tools
   const HAS_FILL = new Set<ToolType>(['rect', 'ellipse']);
 
-  let showColorPicker = $state(false);
+  // All known tool defs flattened, to render a group's "current" face.
+  const ALL_TOOLS: ToolDef[] = [SELECT_TOOL, ERASER_TOOL, ...GROUPS.flatMap(g => g.tools)];
+  function toolDef(t: ToolType): ToolDef {
+    return ALL_TOOLS.find(d => d.type === t) ?? { type: t, label: '?', title: '' };
+  }
+  // The face a group's button shows: the active tool's icon if it belongs to
+  // this group, otherwise the group's first tool.
+  function groupFace(tools: ToolDef[]): ToolDef {
+    return tools.find(d => d.type === activeTool) ?? tools[0];
+  }
+  function groupActive(tools: ToolDef[]): boolean {
+    return tools.some(d => d.type === activeTool);
+  }
+
+  // Which dropdown is open: a group name, 'style', or null.
+  let openMenu = $state<string | null>(null);
+  function toggleMenu(name: string) { openMenu = openMenu === name ? null : name; }
+  function pickTool(t: ToolType) { onToolChange?.(t); openMenu = null; }
 
   let toolbarStyle = $derived.by(() => {
     const GAP = 10;
@@ -92,126 +118,158 @@
 >
   <div class="flex items-center gap-0.5 bg-[#1e1e1e] rounded-xl shadow-2xl px-2 py-1.5 border border-white/10">
 
-    {#if phase === 'annotating'}
-      <!-- ── Tools ── -->
-      {#each TOOLS as tool}
+    <!-- ── Select tool (standalone) ── -->
+    <button
+      class="w-7 h-7 rounded-lg text-xs font-bold transition-all
+        {activeTool === 'select'
+          ? 'bg-blue-500 text-white shadow-inner'
+          : 'text-gray-300 hover:bg-white/10'}"
+      title={SELECT_TOOL.title}
+      onclick={() => pickTool('select')}
+    >{SELECT_TOOL.label}</button>
+
+    <!-- ── Grouped drawing tools (dropdowns) ── -->
+    {#each GROUPS as group}
+      {@const face = groupFace(group.tools)}
+      {@const active = groupActive(group.tools)}
+      <div class="relative">
         <button
-          class="w-7 h-7 rounded-lg text-xs font-bold transition-all
-            {activeTool === tool.type
-              ? 'bg-blue-500 text-white shadow-inner'
-              : 'text-gray-300 hover:bg-white/10'}"
-          title={tool.title}
-          onclick={() => onToolChange?.(tool.type)}
-        >{tool.label}</button>
-      {/each}
-
-      <div class="w-px h-6 bg-white/15 mx-0.5"></div>
-
-      <!-- ── Style controls (color, stroke, fill) ── -->
-      {#if HAS_STYLE.has(activeTool)}
-        <!-- Color picker -->
-        <div class="relative">
-          <button
-            class="w-6 h-6 rounded-full border-2 border-white/40 shadow-inner transition-transform hover:scale-110"
-            style="background:{color}"
-            title="颜色"
-            onclick={() => showColorPicker = !showColorPicker}
-          ></button>
-          {#if showColorPicker}
-            <!-- svelte-ignore a11y_no_static_element_interactions -->
-            <div
-              class="absolute bottom-9 left-1/2 -translate-x-1/2 bg-[#2a2a2a] rounded-xl p-2.5 shadow-2xl border border-white/10 z-50"
-              onmousedown={stopProp}
-            >
-              <div class="grid grid-cols-5 gap-1.5 mb-2">
-                {#each PRESET_COLORS as c}
-                  <button
-                    class="w-6 h-6 rounded-full border-2 transition-transform hover:scale-125
-                      {c === color ? 'border-white scale-110' : 'border-transparent'}"
-                    style="background:{c}"
-                    aria-label="选择颜色 {c}"
-                    onclick={() => { onColorChange?.(c); showColorPicker = false; }}
-                  ></button>
-                {/each}
-              </div>
-              <input
-                type="color" value={color}
-                class="w-full h-7 rounded cursor-pointer border-0"
-                title="自定义颜色"
-                oninput={(e) => onColorChange?.((e.target as HTMLInputElement).value)}
-              />
-            </div>
-          {/if}
-        </div>
-
-        <!-- Stroke width (not for mosaic/highlight/counter) -->
-        {#if activeTool !== 'mosaic' && activeTool !== 'highlight'}
-          <div class="flex items-center gap-0.5">
-            {#each STROKE_WIDTHS as sw}
+          class="flex items-center gap-0.5 h-7 px-1.5 rounded-lg text-xs font-bold transition-all
+            {active ? 'bg-blue-500 text-white shadow-inner' : 'text-gray-300 hover:bg-white/10'}"
+          title={group.name}
+          onclick={() => {
+            // Single-tool groups: just pick it. Multi-tool: open the menu but
+            // also activate the shown tool so a quick click is useful.
+            if (group.tools.length === 1) pickTool(group.tools[0].type);
+            else toggleMenu(group.name);
+          }}
+        >
+          <span>{face.label}</span>
+          {#if group.tools.length > 1}<span class="text-[8px] opacity-70">▾</span>{/if}
+        </button>
+        {#if openMenu === group.name}
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <div
+            class="absolute bottom-9 left-1/2 -translate-x-1/2 flex gap-0.5 bg-[#2a2a2a] rounded-xl p-1.5 shadow-2xl border border-white/10 z-50"
+            onmousedown={stopProp}
+          >
+            {#each group.tools as tool}
               <button
-                class="w-6 h-6 flex items-center justify-center rounded text-xs transition-all
-                  {strokeWidth === sw.value ? 'bg-blue-500/80 text-white' : 'text-gray-400 hover:bg-white/10'}"
-                title="线宽: {sw.label}"
-                onclick={() => onStrokeWidthChange?.(sw.value)}
-              >
-                <div class="rounded-full bg-current" style="width:{sw.value + 1}px;height:{sw.value + 1}px"></div>
-              </button>
+                class="w-7 h-7 rounded-lg text-xs font-bold transition-all
+                  {activeTool === tool.type ? 'bg-blue-500 text-white' : 'text-gray-300 hover:bg-white/10'}"
+                title={tool.title}
+                onclick={() => pickTool(tool.type)}
+              >{tool.label}</button>
             {/each}
           </div>
         {/if}
+      </div>
+    {/each}
 
-        <!-- Fill toggle (rect / ellipse) -->
-        {#if HAS_FILL.has(activeTool)}
-          <button
-            class="w-7 h-7 rounded-lg text-xs font-bold transition-all
-              {fillMode ? 'bg-blue-500/80 text-white' : 'text-gray-400 hover:bg-white/10'}"
-            title={fillMode ? '切换为空心' : '切换为实心'}
-            onclick={onFillToggle}
+    <!-- ── Eraser (standalone) ── -->
+    <button
+      class="w-7 h-7 rounded-lg text-xs font-bold transition-all
+        {activeTool === 'eraser'
+          ? 'bg-blue-500 text-white shadow-inner'
+          : 'text-gray-300 hover:bg-white/10'}"
+      title={ERASER_TOOL.title}
+      onclick={() => pickTool('eraser')}
+    >{ERASER_TOOL.label}</button>
+
+    <!-- ── Style dropdown (color + stroke + fill + text-bg) ── -->
+    {#if HAS_STYLE.has(activeTool)}
+      <div class="relative">
+        <button
+          class="flex items-center gap-1 h-7 px-1.5 rounded-lg transition-all text-gray-300 hover:bg-white/10"
+          title="样式"
+          onclick={() => toggleMenu('style')}
+        >
+          <span class="w-4 h-4 rounded-full border border-white/40" style="background:{color}"></span>
+          <span class="text-[8px] opacity-70">▾</span>
+        </button>
+        {#if openMenu === 'style'}
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <div
+            class="absolute bottom-9 left-1/2 -translate-x-1/2 bg-[#2a2a2a] rounded-xl p-2.5 shadow-2xl border border-white/10 z-50 w-44"
+            onmousedown={stopProp}
           >
-            {fillMode ? '■' : '□'}
-          </button>
+            <!-- Colors -->
+            <div class="grid grid-cols-5 gap-1.5 mb-2">
+              {#each PRESET_COLORS as c}
+                <button
+                  class="w-6 h-6 rounded-full border-2 transition-transform hover:scale-125
+                    {c === color ? 'border-white scale-110' : 'border-transparent'}"
+                  style="background:{c}"
+                  aria-label="选择颜色 {c}"
+                  onclick={() => onColorChange?.(c)}
+                ></button>
+              {/each}
+            </div>
+            <input
+              type="color" value={color}
+              class="w-full h-7 rounded cursor-pointer border-0 mb-2"
+              title="自定义颜色"
+              oninput={(e) => onColorChange?.((e.target as HTMLInputElement).value)}
+            />
+
+            <!-- Stroke width (hidden for mosaic/highlight) -->
+            {#if activeTool !== 'mosaic' && activeTool !== 'highlight'}
+              <div class="flex items-center gap-1 mb-2">
+                <span class="text-[10px] text-gray-400 w-7">线宽</span>
+                {#each STROKE_WIDTHS as sw}
+                  <button
+                    class="flex-1 h-7 flex items-center justify-center rounded text-xs transition-all
+                      {strokeWidth === sw.value ? 'bg-blue-500/80 text-white' : 'text-gray-400 hover:bg-white/10'}"
+                    title="线宽: {sw.label}"
+                    onclick={() => onStrokeWidthChange?.(sw.value)}
+                  >
+                    <div class="rounded-full bg-current" style="width:{sw.value + 1}px;height:{sw.value + 1}px"></div>
+                  </button>
+                {/each}
+              </div>
+            {/if}
+
+            <!-- Fill toggle (rect / ellipse) -->
+            {#if HAS_FILL.has(activeTool)}
+              <button
+                class="w-full h-7 rounded-lg text-xs font-medium transition-all
+                  {fillMode ? 'bg-blue-500/80 text-white' : 'text-gray-300 hover:bg-white/10'}"
+                onclick={onFillToggle}
+              >{fillMode ? '■ 实心' : '□ 空心'}</button>
+            {/if}
+
+            <!-- Text background toggle -->
+            {#if activeTool === 'text'}
+              <button
+                class="w-full h-7 rounded-lg text-xs font-medium transition-all
+                  {textBg ? 'bg-blue-500/80 text-white' : 'text-gray-300 hover:bg-white/10'}"
+                onclick={onTextBgToggle}
+              >{textBg ? '背景: 开' : '背景: 关'}</button>
+            {/if}
+          </div>
         {/if}
-
-        <!-- Text background toggle -->
-        {#if activeTool === 'text'}
-          <button
-            class="w-7 h-7 rounded-lg text-xs font-bold transition-all
-              {textBg ? 'bg-blue-500/80 text-white' : 'text-gray-400 hover:bg-white/10'}"
-            title={textBg ? '取消文字背景' : '添加文字背景'}
-            onclick={onTextBgToggle}
-          >背</button>
-        {/if}
-
-        <div class="w-px h-6 bg-white/15 mx-0.5"></div>
-      {/if}
-
-      <!-- ── Undo / Redo ── -->
-      <button
-        class="w-7 h-7 rounded-lg text-sm transition-all
-          {canUndo ? 'text-gray-200 hover:bg-white/10' : 'text-gray-600 cursor-not-allowed'}"
-        title="撤销 (Ctrl+Z)"
-        onclick={onUndo}
-        disabled={!canUndo}
-      >↩</button>
-      <button
-        class="w-7 h-7 rounded-lg text-sm transition-all
-          {canRedo ? 'text-gray-200 hover:bg-white/10' : 'text-gray-600 cursor-not-allowed'}"
-        title="重做 (Ctrl+Y)"
-        onclick={onRedo}
-        disabled={!canRedo}
-      >↪</button>
-
-      <div class="w-px h-6 bg-white/15 mx-0.5"></div>
-
-    {:else}
-      <!-- ── Selecting phase: quick annotate entry ── -->
-      <button
-        class="flex items-center gap-1 px-2 py-1 text-xs text-gray-200 hover:bg-white/10 rounded-lg transition-colors"
-        title="进入标注模式"
-        onclick={onAnnotate}
-      >✏ 标注</button>
-      <div class="w-px h-6 bg-white/15 mx-0.5"></div>
+      </div>
     {/if}
+
+    <div class="w-px h-6 bg-white/15 mx-0.5"></div>
+
+    <!-- ── Undo / Redo ── -->
+    <button
+      class="w-7 h-7 rounded-lg text-sm transition-all
+        {canUndo ? 'text-gray-200 hover:bg-white/10' : 'text-gray-600 cursor-not-allowed'}"
+      title="撤销 (Ctrl+Z)"
+      onclick={onUndo}
+      disabled={!canUndo}
+    >↩</button>
+    <button
+      class="w-7 h-7 rounded-lg text-sm transition-all
+        {canRedo ? 'text-gray-200 hover:bg-white/10' : 'text-gray-600 cursor-not-allowed'}"
+      title="重做 (Ctrl+Y)"
+      onclick={onRedo}
+      disabled={!canRedo}
+    >↪</button>
+
+    <div class="w-px h-6 bg-white/15 mx-0.5"></div>
 
     <!-- ── Actions ── -->
     <button

@@ -28,6 +28,8 @@
   let screenshotWidth  = $state(0);
   let screenshotHeight = $state(0);
   let overlayScrollMode = $state(false);
+  /** "png" = base64 PNG, "rgba" = raw RGBA pixels (base64) needing canvas decode */
+  let screenshotFormat = $state<'png' | 'rgba'>('png');
 
   // ── Long-screenshot (scroll capture) state, runs in the main window ──
   let scrollActive = $state(false);
@@ -138,23 +140,78 @@
     }
 
     if (isOverlay) {
-      const ul3 = await listen<{ image_data: string; width: number; height: number; scroll?: boolean }>(
-        'show-overlay',
-        async (event) => {
-          screenshotData    = event.payload.image_data;
-          screenshotWidth   = event.payload.width;
-          screenshotHeight  = event.payload.height;
-          overlayScrollMode = event.payload.scroll === true;
-          overlayVisible    = true;
-        }
-      );
+      // Make the overlay fullscreen once, up front, while it's still hidden.
+      // Rust shows this window with a bare show() on the shortcut path, so it
+      // must already be fullscreen — we can't rely on a JS-side transition then.
+      try {
+        await currentWindow.setFullscreen(true);
+        overlayFullscreenSet = true;
+      } catch (e) { console.error('overlay fullscreen failed:', e); }
+
+      // New fast path: Rust shows the overlay window and fires this the instant
+      // the shortcut/tray is hit. We render the selection UI immediately over
+      // the live desktop — NO screenshot is taken yet. The full-screen grab is
+      // deferred until the user commits a region (see captureForSelection).
+      const ul3 = await listen<string>('start-selection', async (event) => {
+        const t0 = performance.now();
+        perf(`[overlay] start-selection received, mode=${event.payload}`);
+        // Reset so a fresh selection starts clean each time.
+        screenshotData    = null;
+        overlayScrollMode = event.payload === 'scroll';
+        overlayVisible    = true;
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          perf(`[overlay] selection UI painted: +${(performance.now() - t0).toFixed(0)}ms (INSTANT)`);
+        }));
+      });
       unlisteners.push(ul3);
     }
   }
 
+  // Capture ONLY the selected region (physical px) to serve as the annotation
+  // backdrop. Called the moment the user commits a region — i.e. after framing
+  // (and any edge tweaks), so we encode just that small crop instead of a 4K
+  // full screen. That keeps annotate/copy/save/pin snappy.
+  async function captureForSelection(
+    region: { x: number; y: number; w: number; h: number }
+  ): Promise<{ data: string; width: number; height: number } | null> {
+    const t0 = performance.now();
+    try {
+      // The overlay's dim mask must NOT be baked into the grab. xcap captures
+      // the real desktop including this transparent window, so we hide it for
+      // the duration of the capture, then bring it straight back.
+      await currentWindow.hide();
+      const result = await invoke<{ image_data: string; width: number; height: number }>(
+        'capture_region',
+        { monitorIndex: 0, x: region.x, y: region.y, width: region.w, height: region.h }
+      );
+      await currentWindow.show();
+      await currentWindow.setFocus();
+      perf(`[overlay] captureForSelection (region ${region.w}x${region.h}): +${(performance.now() - t0).toFixed(0)}ms (${(result.image_data.length / 1024).toFixed(0)}KB)`);
+      screenshotData   = result.image_data;
+      screenshotWidth  = result.width;
+      screenshotHeight = result.height;
+      return { data: result.image_data, width: result.width, height: result.height };
+    } catch (err) {
+      console.error('captureForSelection failed:', err);
+      return null;
+    }
+  }
+
+  // Fire-and-forget perf log that lands in the `pnpm tauri dev` terminal
+  // alongside the Rust `[perf]` prints, so the whole chain is in one stream.
+  function perf(msg: string) {
+    invoke('perf_log', { msg }).catch(() => {});
+  }
+
+  // Runs in the MAIN window. Only handles modes that don't go straight to the
+  // selection overlay: "fullscreen" (grab + clipboard, no UI) and "delayed-*"
+  // (countdown, then hand off to the overlay for region selection). The common
+  // region/scroll paths are now triggered directly from Rust → overlay, so the
+  // trigger is instant and never round-trips a screenshot through this window.
   async function handleCaptureTrigger(mode: string) {
     try {
-      // Delayed capture: mode = "delayed-2" or "delayed-5"
+      // Delayed capture: mode = "delayed-2" or "delayed-5" → countdown, then
+      // open the selection overlay just like a normal region capture.
       if (mode.startsWith('delayed-')) {
         const secs = parseInt(mode.split('-')[1]) || 0;
         await currentWindow.show();
@@ -164,45 +221,35 @@
         }
         countdown = null;
         await currentWindow.hide();
-        mode = 'region';
-      }
-
-      // Small settle so a freshly-closed tray menu isn't caught in the frame.
-      // Down from 250ms → 80ms for a snappier capture; kept as a timeout (not
-      // rAF) because this runs in the hidden main window where rAF is throttled.
-      await new Promise((r) => setTimeout(r, 80));
-
-      const result = await invoke<{ image_data: string; width: number; height: number; monitor_id: number }>(
-        'capture_screens', { monitorIndex: 0 }
-      );
-
-      if (mode === 'fullscreen') {
-        await invoke('save_to_clipboard', { imageData: result.image_data });
+        await showSelectionOverlay('region');
         return;
       }
 
-      const { WebviewWindow } = await import('@tauri-apps/api/webviewWindow');
-      const overlayWin = await WebviewWindow.getByLabel('overlay');
-      if (overlayWin) {
-        await overlayWin.emit('show-overlay', {
-          image_data: result.image_data,
-          width: result.width,
-          height: result.height,
-          scroll: mode === 'scroll',
-        });
-        // Fullscreen transition only on the very first capture; afterwards the
-        // window stays fullscreen (just hidden), so show() is instant.
-        if (!overlayFullscreenSet) {
-          await overlayWin.setFullscreen(true);
-          overlayFullscreenSet = true;
-        }
-        await overlayWin.show();
-        await overlayWin.setFocus();
+      if (mode === 'fullscreen') {
+        const result = await invoke<{ image_data: string }>('capture_screens', { monitorIndex: 0 });
+        await invoke('save_to_clipboard', { imageData: result.image_data });
+        return;
       }
     } catch (err) {
       countdown = null;
       console.error('Capture failed:', err);
     }
+  }
+
+  // Show the (already-fullscreen) overlay window and tell it to begin selecting.
+  // Mirrors what Rust does on the global shortcut; used by the delayed-capture
+  // path which must run its countdown in the main window first.
+  async function showSelectionOverlay(mode: 'region' | 'scroll') {
+    const { WebviewWindow } = await import('@tauri-apps/api/webviewWindow');
+    const overlayWin = await WebviewWindow.getByLabel('overlay');
+    if (!overlayWin) return;
+    if (!overlayFullscreenSet) {
+      await overlayWin.setFullscreen(true);
+      overlayFullscreenSet = true;
+    }
+    await overlayWin.show();
+    await overlayWin.setFocus();
+    await overlayWin.emit('start-selection', mode);
   }
 
   async function handlePastePin() {
@@ -422,12 +469,13 @@
   });
 </script>
 
-{#if isOverlay && overlayVisible && screenshotData}
+{#if isOverlay && overlayVisible}
   <CaptureOverlay
-    {screenshotData}
-    {screenshotWidth}
-    {screenshotHeight}
+    bind:screenshotData
+    bind:screenshotWidth
+    bind:screenshotHeight
     scrollMode={overlayScrollMode}
+    {captureForSelection}
     oncopy={onCopy}
     onsave={onSave}
     onquicksave={onQuickSave}

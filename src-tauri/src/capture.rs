@@ -77,16 +77,32 @@ pub fn get_monitor_list() -> Vec<MonitorInfo> {
 
 /// Capture a specific monitor entirely
 pub fn capture_full_monitor(monitor_index: usize) -> Result<CaptureResult, String> {
+    let t_start = std::time::Instant::now();
+
     let monitors = xcap::Monitor::all().map_err(|e| e.to_string())?;
+    let t_enum = t_start.elapsed();
+
     let monitor = monitors
         .get(monitor_index)
         .ok_or_else(|| "Monitor not found".to_string())?;
 
     let raw = monitor.capture_image().map_err(|e| e.to_string())?;
+    let t_capture = t_start.elapsed();
+
     let width = raw.width();
     let height = raw.height();
 
     let base64_data = encode_rgba_to_base64_png(raw.as_raw(), width, height)?;
+    let t_encode = t_start.elapsed();
+
+    eprintln!(
+        "[perf] capture_full_monitor: enum={:.0}ms capture={:.0}ms encode={:.0}ms total={:.0}ms ({}x{})",
+        t_enum.as_secs_f64() * 1000.0,
+        (t_capture - t_enum).as_secs_f64() * 1000.0,
+        (t_encode - t_capture).as_secs_f64() * 1000.0,
+        t_encode.as_secs_f64() * 1000.0,
+        width, height,
+    );
 
     Ok(CaptureResult {
         image_data: base64_data,
@@ -153,12 +169,15 @@ pub fn capture_monitor_region(
     width: u32,
     height: u32,
 ) -> Result<CaptureResult, String> {
+    let t_start = std::time::Instant::now();
+
     let monitors = xcap::Monitor::all().map_err(|e| e.to_string())?;
     let monitor = monitors
         .get(monitor_index)
         .ok_or_else(|| "Monitor not found".to_string())?;
 
     let raw = monitor.capture_image().map_err(|e| e.to_string())?;
+    let t_capture = t_start.elapsed();
     let full_image = image::DynamicImage::ImageRgba8(raw);
 
     // Crop the region - ensure bounds are valid
@@ -171,6 +190,15 @@ pub fn capture_monitor_region(
     let (cw, ch) = (cropped.width(), cropped.height());
 
     let base64_data = encode_rgba_to_base64_png(cropped.as_raw(), cw, ch)?;
+    let t_encode = t_start.elapsed();
+
+    eprintln!(
+        "[perf] capture_monitor_region: capture={:.0}ms crop+encode={:.0}ms total={:.0}ms ({}x{})",
+        t_capture.as_secs_f64() * 1000.0,
+        (t_encode - t_capture).as_secs_f64() * 1000.0,
+        t_encode.as_secs_f64() * 1000.0,
+        cw, ch,
+    );
 
     Ok(CaptureResult {
         image_data: base64_data,
