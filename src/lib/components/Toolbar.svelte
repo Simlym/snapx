@@ -62,29 +62,38 @@
     '#ef4444', '#f97316', '#eab308', '#22c55e', '#3b82f6', '#ffffff', '#000000',
   ];
 
-  interface ToolDef { type: ToolType; label: string; title: string }
+  interface ToolDef { type: ToolType; title: string }
 
-  // Standalone buttons (always visible, no dropdown).
-  const SELECT_TOOL: ToolDef = { type: 'select', label: '↖', title: '选择/移动 (S)' };
-  const ERASER_TOOL: ToolDef = { type: 'eraser', label: '⌫', title: '橡皮擦 (X)' };
+  // Standalone buttons (always visible, no dropdown). Icons render via the
+  // {#snippet icon} below, keyed by `type` — see the markup.
+  const SELECT_TOOL: ToolDef = { type: 'select', title: '选择/移动 (S)' };
+  const ERASER_TOOL: ToolDef = { type: 'eraser', title: '橡皮擦 (X)' };
 
-  // Drawing tools grouped into dropdowns to keep the bar short.
+  // Drawing tools grouped so the bar stays short; the group's current tool
+  // shows on the bar, siblings switch from the style panel's tool row.
   const GROUPS: { name: string; tools: ToolDef[] }[] = [
     { name: '形状', tools: [
-      { type: 'rect',    label: '▭', title: '矩形 (R)' },
-      { type: 'ellipse', label: '◯', title: '椭圆 (E)' },
-      { type: 'arrow',   label: '↗', title: '箭头 (A)' },
-      { type: 'line',    label: '╱', title: '直线 (L)' },
+      { type: 'rect',    title: '矩形 (R)' },
+      { type: 'ellipse', title: '椭圆 (E)' },
+      { type: 'arrow',   title: '箭头 (A)' },
+      { type: 'line',    title: '直线 (L)' },
     ]},
     { name: '标记', tools: [
-      { type: 'text',      label: 'T',  title: '文字 (T)' },
-      { type: 'pen',       label: '✏', title: '画笔 (P)' },
-      { type: 'counter',   label: '①',  title: '序号 (N)' },
-      { type: 'highlight', label: '▨',  title: '高亮 (H)' },
+      { type: 'text',      title: '文字 (T)' },
+      { type: 'pen',       title: '画笔 (P)' },
+      { type: 'counter',   title: '序号 (N)' },
+      { type: 'highlight', title: '高亮 (H)' },
     ]},
     { name: '遮掩', tools: [
-      { type: 'mosaic', label: '▒', title: '马赛克 (M)' },
+      { type: 'mosaic', title: '马赛克 (M)' },
     ]},
+  ];
+
+  // Quick stroke-width presets (the slider beside them stays for fine-tuning).
+  const STROKE_PRESETS = [
+    { w: 2,  dot: 4,  label: '细' },
+    { w: 6,  dot: 8,  label: '中' },
+    { w: 12, dot: 13, label: '粗' },
   ];
 
   // Which traits each tool exposes in its style panel.
@@ -241,6 +250,39 @@
   function stopProp(e: MouseEvent) { e.stopPropagation(); }
 </script>
 
+<!-- Tool icons — one consistent SVG set keyed by tool type, replacing the
+     glyphs that rendered unevenly across platforms/fonts. -->
+{#snippet icon(type: ToolType)}
+  <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+    stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    {#if type === 'select'}
+      <path d="M5 3l14 6.6-6 1.7L10.6 18z" fill="currentColor" stroke="none"/>
+    {:else if type === 'rect'}
+      <rect x="4" y="6" width="16" height="12" rx="1.5"/>
+    {:else if type === 'ellipse'}
+      <ellipse cx="12" cy="12" rx="9" ry="6.5"/>
+    {:else if type === 'arrow'}
+      <path d="M5 19L17.5 6.5"/><path d="M11 6.5h7v7"/>
+    {:else if type === 'line'}
+      <path d="M5 19L19 5"/>
+    {:else if type === 'text'}
+      <path d="M6 6V5h12v1M12 5v14M9.5 19h5"/>
+    {:else if type === 'pen'}
+      <path d="M4 20l1.3-4L15 6.3l2.7 2.7L8 18.7z"/><path d="M13.5 7.8l2.7 2.7"/>
+    {:else if type === 'counter'}
+      <circle cx="12" cy="12" r="8.5"/><path d="M10.8 9.6l1.7-1.2V16M10.5 16h4"/>
+    {:else if type === 'highlight'}
+      <path d="M5 19.5h6"/><path d="M8.5 16L14 6l4 2.3-5.5 10z"/>
+    {:else if type === 'mosaic'}
+      <rect x="4" y="4" width="16" height="16" rx="1"/>
+      <path d="M4 9.3h16M4 14.6h16M9.3 4v16M14.6 4v16"/>
+    {:else if type === 'eraser'}
+      <path d="M8.5 20H6l-2.2-2.2a1.8 1.8 0 010-2.6l8-8 6.8 6.8-6 6z"/>
+      <path d="M9.5 9.5l6.8 6.8"/><path d="M7 20h12"/>
+    {/if}
+  </svg>
+{/snippet}
+
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
   class="snapx-toolbar fixed z-50 select-none"
@@ -269,13 +311,13 @@
     <!-- ── Select tool (standalone) ── -->
     <button
       bind:this={toolEls['select']}
-      class="w-7 h-7 rounded-lg text-xs font-bold transition-all
+      class="w-7 h-7 flex items-center justify-center rounded-lg transition-all
         {activeTool === 'select'
           ? 'bg-blue-500 text-white shadow-inner'
           : 'text-gray-300 hover:bg-white/10'}"
       title={SELECT_TOOL.title}
       onclick={() => pickTool('select')}
-    >{SELECT_TOOL.label}</button>
+    >{@render icon('select')}</button>
 
     <!-- ── Grouped drawing tools: one button per group showing its current
          tool. Switching *within* a group happens in the style panel's tool
@@ -285,41 +327,49 @@
       {@const active = groupActive(group.tools)}
       <button
         bind:this={toolEls[face.type]}
-        class="w-7 h-7 flex items-center justify-center rounded-lg text-xs font-bold transition-all
+        class="w-7 h-7 flex items-center justify-center rounded-lg transition-all
           {active ? 'bg-blue-500 text-white shadow-inner' : 'text-gray-300 hover:bg-white/10'}"
         title={face.title}
         onclick={() => pickTool(face.type)}
-      >{face.label}</button>
+      >{@render icon(face.type)}</button>
     {/each}
 
     <!-- ── Eraser (standalone) ── -->
     <button
       bind:this={toolEls['eraser']}
-      class="w-7 h-7 rounded-lg text-xs font-bold transition-all
+      class="w-7 h-7 flex items-center justify-center rounded-lg transition-all
         {activeTool === 'eraser'
           ? 'bg-blue-500 text-white shadow-inner'
           : 'text-gray-300 hover:bg-white/10'}"
       title={ERASER_TOOL.title}
       onclick={() => pickTool('eraser')}
-    >{ERASER_TOOL.label}</button>
+    >{@render icon('eraser')}</button>
 
     <div class="w-px h-6 bg-white/15 mx-0.5"></div>
 
     <!-- ── Undo / Redo ── -->
     <button
-      class="w-7 h-7 rounded-lg text-sm transition-all
+      class="w-7 h-7 flex items-center justify-center rounded-lg transition-all
         {canUndo ? 'text-gray-200 hover:bg-white/10' : 'text-gray-600 cursor-not-allowed'}"
       title="撤销 (Ctrl+Z)"
       onclick={onUndo}
       disabled={!canUndo}
-    >↩</button>
+    >
+      <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M9 14L4 9l5-5"/><path d="M4 9h10a6 6 0 010 12h-3"/>
+      </svg>
+    </button>
     <button
-      class="w-7 h-7 rounded-lg text-sm transition-all
+      class="w-7 h-7 flex items-center justify-center rounded-lg transition-all
         {canRedo ? 'text-gray-200 hover:bg-white/10' : 'text-gray-600 cursor-not-allowed'}"
       title="重做 (Ctrl+Y)"
       onclick={onRedo}
       disabled={!canRedo}
-    >↪</button>
+    >
+      <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M15 14l5-5-5-5"/><path d="M20 9H10a6 6 0 000 12h3"/>
+      </svg>
+    </button>
 
     <div class="w-px h-6 bg-white/15 mx-0.5"></div>
 
@@ -421,23 +471,36 @@
           <div class="flex items-center gap-1">
             {#each switchTools as t}
               <button
-                class="w-7 h-7 flex items-center justify-center rounded-lg text-sm font-bold transition-all
+                class="w-7 h-7 flex items-center justify-center rounded-lg transition-all
                   {styleType === t.type ? 'bg-blue-500/80 text-white' : 'text-gray-400 hover:bg-white/10'}"
                 title={t.title}
                 onclick={() => switchTo(t.type)}
-              >{t.label}</button>
+              >{@render icon(t.type)}</button>
             {/each}
           </div>
           <div class="w-px h-6 bg-white/15"></div>
         {/if}
 
-        <!-- Brush / stroke size — scroll over this area or drag the slider. -->
+        <!-- Brush / stroke size — quick presets (细/中/粗), then a slider for
+             fine-tuning. Scroll anywhere over this area also nudges the size. -->
         {#if HAS_STROKE.has(styleType)}
           <!-- svelte-ignore a11y_no_static_element_interactions -->
           <div class="flex items-center gap-1.5" onwheel={strokeWheel} title="画笔大小(滚轮缩放)">
+            <div class="flex items-center gap-1">
+              {#each STROKE_PRESETS as p}
+                <button
+                  class="w-7 h-7 flex items-center justify-center rounded-lg transition-all
+                    {strokeWidth === p.w ? 'bg-blue-500/80 text-white' : 'text-gray-300 hover:bg-white/10'}"
+                  title="{p.label} · {p.w}px"
+                  onclick={() => onStrokeWidthChange?.(p.w)}
+                >
+                  <span class="rounded-full bg-current" style="width:{p.dot}px;height:{p.dot}px"></span>
+                </button>
+              {/each}
+            </div>
             <input
               type="range" min="1" max="20" value={strokeWidth}
-              class="snapx-range w-20"
+              class="snapx-range w-16"
               oninput={(e) => onStrokeWidthChange?.(+(e.target as HTMLInputElement).value)}
             />
             <span class="text-[10px] text-gray-300 font-mono tabular-nums w-7 text-right">{strokeWidth}px</span>
@@ -476,19 +539,25 @@
                 {arrowStyle === 'end' ? 'bg-blue-500/80 text-white' : 'text-gray-400 hover:bg-white/10'}"
               title="单向箭头"
               onclick={() => onArrowStyleChange?.('end')}
-            >→</button>
+            >
+              <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12h14M13 7l5 5-5 5"/></svg>
+            </button>
             <button
               class="w-7 h-7 flex items-center justify-center rounded-lg transition-all
                 {arrowStyle === 'both' ? 'bg-blue-500/80 text-white' : 'text-gray-400 hover:bg-white/10'}"
               title="双向箭头"
               onclick={() => onArrowStyleChange?.('both')}
-            >↔</button>
+            >
+              <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h18M8 7l-5 5 5 5M16 7l5 5-5 5"/></svg>
+            </button>
             <button
               class="w-7 h-7 flex items-center justify-center rounded-lg transition-all
                 {arrowStyle === 'none' ? 'bg-blue-500/80 text-white' : 'text-gray-400 hover:bg-white/10'}"
               title="无箭头"
               onclick={() => onArrowStyleChange?.('none')}
-            >—</button>
+            >
+              <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 12h16"/></svg>
+            </button>
           </div>
         {/if}
 
@@ -511,11 +580,13 @@
         {#if HAS_FILL.has(styleType)}
           <div class="w-px h-6 bg-white/15"></div>
           <button
-            class="w-7 h-7 flex items-center justify-center rounded-lg text-sm transition-all
+            class="w-7 h-7 flex items-center justify-center rounded-lg transition-all
               {fillMode ? 'bg-blue-500/80 text-white' : 'text-gray-300 hover:bg-white/10'}"
             title={fillMode ? '实心' : '空心'}
             onclick={onFillToggle}
-          >{fillMode ? '■' : '□'}</button>
+          >
+            <svg class="w-4 h-4" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><rect x="5" y="5" width="14" height="14" rx="1.5" fill={fillMode ? 'currentColor' : 'none'}/></svg>
+          </button>
         {/if}
 
         <!-- Text background toggle -->
