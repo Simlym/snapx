@@ -100,10 +100,17 @@
   function groupActive(tools: ToolDef[]): boolean {
     return tools.some(d => d.type === activeTool);
   }
-
-  // ── Tool group switch menu (▾) ─────────────────────────────────────
-  let openGroup = $state<string | null>(null);
-  function toggleGroup(name: string) { openGroup = openGroup === name ? null : name; }
+  // The group a tool belongs to (undefined for the standalone select/eraser).
+  function groupOf(t: ToolType) {
+    return GROUPS.find(g => g.tools.some(d => d.type === t));
+  }
+  // Two shapes can "morph" in place (carrying geometry/colour) when they share
+  // a geometry family: box-based (rect⇄ellipse) or segment-based (arrow⇄line).
+  function morphCompatible(a: ToolType, b: ToolType): boolean {
+    const box = (x: ToolType) => x === 'rect' || x === 'ellipse';
+    const seg = (x: ToolType) => x === 'arrow' || x === 'line';
+    return (box(a) && box(b)) || (seg(a) && seg(b));
+  }
 
   // ── Style panel — anchored under the *active* tool's button ────────
   // The style panel "follows the selection": picking a tool opens it right
@@ -120,12 +127,24 @@
 
   function pickTool(t: ToolType) {
     onToolChange?.(t);
-    openGroup = null;
     // Selecting a styleable tool auto-opens its style panel. The select tool
     // keeps it open too — it'll show once an annotation is actually selected
     // (governed by hasSelection in showStyle).
     styleOpen = HAS_STYLE.has(t) || t === 'select';
   }
+
+  // Clicking a sibling in the panel's tool row: morph the *selected* annotation
+  // in place when the target shares its geometry family, otherwise just switch
+  // the active drawing tool (which clears any selection downstream).
+  function switchTo(t: ToolType) {
+    if (hasSelection && t !== styleType && morphCompatible(styleType, t)) {
+      onShapeSwitch?.(t as 'rect' | 'ellipse' | 'arrow' | 'line');
+    } else {
+      pickTool(t);
+    }
+  }
+  // Sibling tools shown in the panel's switch row (empty for standalone tools).
+  const switchTools = $derived(groupOf(styleType)?.tools ?? []);
 
   // Recompute the panel anchor whenever the active tool (or layout) changes.
   function updateAnchor() {
@@ -153,7 +172,7 @@
   $effect(() => {
     // touch deps so the effect re-runs when they change
     void activeTool; void styleType; void hasSelection; void styleOpen;
-    void openGroup; void phase;
+    void switchTools; void phase;
     void selX; void selY; void selW; void selH; void detached;
     requestAnimationFrame(updateAnchor);
   });
@@ -258,47 +277,19 @@
       onclick={() => pickTool('select')}
     >{SELECT_TOOL.label}</button>
 
-    <!-- ── Grouped drawing tools: main icon + ▾ switch ── -->
+    <!-- ── Grouped drawing tools: one button per group showing its current
+         tool. Switching *within* a group happens in the style panel's tool
+         row (no separate dropdown). ── -->
     {#each GROUPS as group}
       {@const face = groupFace(group.tools)}
       {@const active = groupActive(group.tools)}
-      <div class="relative flex items-stretch">
-        <!-- Main icon: directly activates the group's current tool. -->
-        <button
-          bind:this={toolEls[face.type]}
-          class="w-7 h-7 flex items-center justify-center text-xs font-bold transition-all
-            {group.tools.length > 1 ? 'rounded-l-lg' : 'rounded-lg'}
-            {active ? 'bg-blue-500 text-white shadow-inner' : 'text-gray-300 hover:bg-white/10'}"
-          title={face.title}
-          onclick={() => pickTool(face.type)}
-        >{face.label}</button>
-        <!-- Switch caret: opens the group's tool menu (multi-tool groups only). -->
-        {#if group.tools.length > 1}
-          <button
-            class="w-4 h-7 flex items-center justify-center rounded-r-lg text-[9px] transition-all border-l border-black/20
-              {active ? 'bg-blue-500/80 text-white hover:bg-blue-500' : 'text-gray-400 hover:bg-white/10'}
-              {openGroup === group.name ? 'bg-white/15' : ''}"
-            title="切换{group.name}"
-            onclick={() => toggleGroup(group.name)}
-          >▾</button>
-        {/if}
-        {#if openGroup === group.name}
-          <!-- svelte-ignore a11y_no_static_element_interactions -->
-          <div
-            class="absolute bottom-9 left-1/2 -translate-x-1/2 flex gap-0.5 bg-[#2a2a2a] rounded-xl p-1.5 shadow-2xl border border-white/10 z-50"
-            onmousedown={stopProp}
-          >
-            {#each group.tools as tool}
-              <button
-                class="w-8 h-8 rounded-lg text-sm font-bold transition-all
-                  {activeTool === tool.type ? 'bg-blue-500 text-white' : 'text-gray-300 hover:bg-white/10'}"
-                title={tool.title}
-                onclick={() => pickTool(tool.type)}
-              >{tool.label}</button>
-            {/each}
-          </div>
-        {/if}
-      </div>
+      <button
+        bind:this={toolEls[face.type]}
+        class="w-7 h-7 flex items-center justify-center rounded-lg text-xs font-bold transition-all
+          {active ? 'bg-blue-500 text-white shadow-inner' : 'text-gray-300 hover:bg-white/10'}"
+        title={face.title}
+        onclick={() => pickTool(face.type)}
+      >{face.label}</button>
     {/each}
 
     <!-- ── Eraser (standalone) ── -->
@@ -423,38 +414,19 @@
              under focus. Shape-switch first, then size, line, arrow, round,
              fill, text-bg; COLOUR last (least-frequently changed). -->
 
-        <!-- Shape switch (only for a SELECTED annotation): rect⇄ellipse or
-             arrow⇄line — change a drawn shape's type in place. -->
-        {#if hasSelection && (styleType === 'rect' || styleType === 'ellipse')}
+        <!-- Tool/shape switch row: pick any sibling of the active group right
+             here. With a selection, a geometry-compatible target morphs the
+             drawn shape in place; otherwise it switches the active draw tool. -->
+        {#if switchTools.length > 1}
           <div class="flex items-center gap-1">
-            <button
-              class="w-7 h-7 flex items-center justify-center rounded-lg text-sm font-bold transition-all
-                {styleType === 'rect' ? 'bg-blue-500/80 text-white' : 'text-gray-400 hover:bg-white/10'}"
-              title="矩形"
-              onclick={() => onShapeSwitch?.('rect')}
-            >▭</button>
-            <button
-              class="w-7 h-7 flex items-center justify-center rounded-lg text-sm font-bold transition-all
-                {styleType === 'ellipse' ? 'bg-blue-500/80 text-white' : 'text-gray-400 hover:bg-white/10'}"
-              title="椭圆"
-              onclick={() => onShapeSwitch?.('ellipse')}
-            >◯</button>
-          </div>
-          <div class="w-px h-6 bg-white/15"></div>
-        {:else if hasSelection && (styleType === 'arrow' || styleType === 'line')}
-          <div class="flex items-center gap-1">
-            <button
-              class="w-7 h-7 flex items-center justify-center rounded-lg text-sm font-bold transition-all
-                {styleType === 'arrow' ? 'bg-blue-500/80 text-white' : 'text-gray-400 hover:bg-white/10'}"
-              title="箭头"
-              onclick={() => onShapeSwitch?.('arrow')}
-            >↗</button>
-            <button
-              class="w-7 h-7 flex items-center justify-center rounded-lg text-sm font-bold transition-all
-                {styleType === 'line' ? 'bg-blue-500/80 text-white' : 'text-gray-400 hover:bg-white/10'}"
-              title="直线"
-              onclick={() => onShapeSwitch?.('line')}
-            >╱</button>
+            {#each switchTools as t}
+              <button
+                class="w-7 h-7 flex items-center justify-center rounded-lg text-sm font-bold transition-all
+                  {styleType === t.type ? 'bg-blue-500/80 text-white' : 'text-gray-400 hover:bg-white/10'}"
+                title={t.title}
+                onclick={() => switchTo(t.type)}
+              >{t.label}</button>
+            {/each}
           </div>
           <div class="w-px h-6 bg-white/15"></div>
         {/if}

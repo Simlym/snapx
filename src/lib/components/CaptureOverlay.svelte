@@ -1323,6 +1323,7 @@
         arrowStyle = s;
         if (selectedAnn?.type === 'arrow') patchSelected({ head: s });
       }}
+      onShapeSwitch={switchSelectedShape}
       onUndo={undo}
       onRedo={redo}
       onOcr={runOcr}
