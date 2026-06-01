@@ -43,3 +43,24 @@ html, body, #app {
   from { opacity: 0; }
   to   { opacity: 1; }
 }
+
+/* ── OCR selectable text layer (PDF-style "select text off the image") ──── */
+.snapx-ocr-layer {
+  overflow: hidden;
+}
+.snapx-ocr-line {
+  position: absolute;
+  white-space: pre;
+  color: transparent;
+  cursor: text;
+  user-select: text;
+  -webkit-user-select: text;
+  transform-origin: left top;
+  pointer-events: auto;
+}
+.snapx-ocr-line::selection {
+  background: rgba(59, 130, 246, 0.40);
+}
+.snapx-ocr-line::-moz-selection {
+  background: rgba(59, 130, 246, 0.40);
+}

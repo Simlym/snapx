@@ -24,21 +24,13 @@ image = "0.25"
 base64 = "0.22"
 xcap = "0.0.14"
 
+# On-device OCR via PaddleOCR (PP-OCRv5) on the MNN inference backend.
+# Pure-Rust, fully offline, cross-platform — replaces the Windows-only
+# Windows.Media.Ocr engine and recognises mixed CN/EN out of the box.
+ocr-rs = "2.2"
+
 # Compile dependencies with optimizations even in dev mode.
 # This massively speeds up image encoding (PNG) and base64 — 1100ms → ~80ms
 # for 4K captures — while keeping the main crate debuggable.
 [profile.dev.package."*"]
 opt-level = 2
-
-# Native OCR on Windows via Windows.Media.Ocr (fully offline, on-device).
-# Platform-gated so non-Windows builds don't pull the windows crate at all.
-[target.'cfg(windows)'.dependencies]
-windows = { version = "0.58", features = [
-    "Foundation",
-    "Foundation_Collections",
-    "Globalization",
-    "Graphics_Imaging",
-    "Media_Ocr",
-    "Security_Cryptography",
-    "Storage_Streams",
-] }
