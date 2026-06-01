@@ -379,6 +379,7 @@
     if (textVisible && e.key !== 'Escape') return;
 
     if (e.key === 'Escape') {
+      if (ocrActive) { ocrActive = false; return; }
       if (textVisible) { textVisible = false; return; }
       if (phase === 'annotating') { selectedId = null; backToSelecting(); return; }
       oncancel?.();
@@ -462,6 +463,9 @@
     currentAnn = null;
     selectedId = null;
     counterNum = 1;
+    ocrActive = false;
+    ocrData = null;
+    ocrError = null;
   }
 
   function pushUndo() {
@@ -828,21 +832,35 @@
     else if (action === 'pin')       onpin?.(data, width, height);
   }
 
-  // ── OCR ────────────────────────────────────────────────────────────
-  let ocrText = $state<string | null>(null);
+  // ── OCR (text recognition + selectable text layer) ──────────────────
+  interface OcrLine { text: string; x: number; y: number; w: number; h: number }
+  interface OcrData { lines: OcrLine[]; img_w: number; img_h: number }
+
+  let ocrActive = $state(false);              // text-selection mode on/off
+  let ocrData = $state<OcrData | null>(null); // cached recognition for this capture
   let ocrBusy = $state(false);
   let ocrError = $state<string | null>(null);
   let ocrCopied = $state(false);
 
+  // The screenshot is drawn 1:1 over the selection rect, so OCR boxes (in
+  // recognised-image px) map to viewport CSS px by sel-size / screenshot-size.
+  let ocrScaleX = $derived(screenshotWidth ? sel.w / screenshotWidth : 1);
+  let ocrScaleY = $derived(screenshotHeight ? sel.h / screenshotHeight : 1);
+
   async function runOcr() {
+    if (ocrActive) { ocrActive = false; return; }   // toggle off
     if (!(await ensureScreenshot())) return;
+    // Freeze the capture (stable image + dim backdrop), as entering annotate does.
+    phase = 'annotating';
+    ocrActive = true;
+    if (ocrData) return;                             // cached → instant
     ocrBusy = true;
     ocrError = null;
     try {
-      const { data } = await compositeImage();
-      const text = await invoke<string>('ocr_image', { imageData: data });
-      ocrText = text.trim();
-      if (!ocrText) ocrError = '未识别到文字';
+      // OCR the *raw* screenshot (no annotations) — best accuracy.
+      const res = await invoke<OcrData>('ocr_image', { imageData: screenshotData });
+      ocrData = res;
+      if (!res.lines.length) ocrError = '未识别到文字';
     } catch (e) {
       ocrError = String(e);
     } finally {
@@ -851,15 +869,28 @@
   }
 
   async function copyOcrText() {
-    if (!ocrText) return;
+    const text = ocrData ? ocrData.lines.map((l) => l.text).join('\n') : '';
+    if (!text) return;
     try {
-      await navigator.clipboard.writeText(ocrText);
+      await navigator.clipboard.writeText(text);
       ocrCopied = true;
       setTimeout(() => (ocrCopied = false), 1000);
     } catch (_) { /* unavailable */ }
   }
 
-  function closeOcr() { ocrText = null; ocrError = null; }
+  function closeOcr() { ocrActive = false; }
+
+  // Stretch a text-layer line to exactly fill its box width (pdf.js technique)
+  // so the transparent selectable text lines up with the glyphs in the image.
+  function fitLine(node: HTMLElement, targetW: number) {
+    const apply = (w: number) => {
+      node.style.transform = 'none';
+      const natural = node.scrollWidth;
+      if (natural > 0 && w > 0) node.style.transform = `scaleX(${w / natural})`;
+    };
+    requestAnimationFrame(() => apply(targetW));
+    return { update(w: number) { requestAnimationFrame(() => apply(w)); } };
+  }
 
   // ── Long screenshot: hand the chosen region (physical px) back to App ──
   function confirmScrollRegion() {
@@ -1051,6 +1082,29 @@
       style="left:{sel.x}px; top:{sel.y}px; width:{sel.w}px; height:{sel.h}px; animation: snapx-fade-in 0.14s ease both;"
       draggable={false}
     />
+  {/if}
+
+  <!-- OCR selectable text layer: transparent, per-line positioned text laid
+       over the screenshot so the user can drag-select / double-click words /
+       copy, just like selecting text in a PDF. -->
+  {#if ocrActive && ocrData}
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div
+      class="absolute z-[55] snapx-ocr-layer"
+      style="left:{sel.x}px; top:{sel.y}px; width:{sel.w}px; height:{sel.h}px;"
+      onmousedown={(e) => e.stopPropagation()}
+      onmousemove={(e) => e.stopPropagation()}
+      onmouseup={(e) => e.stopPropagation()}
+      ondblclick={(e) => e.stopPropagation()}
+    >
+      {#each ocrData.lines as line}
+        <div
+          class="snapx-ocr-line"
+          style="left:{line.x * ocrScaleX}px; top:{line.y * ocrScaleY}px; height:{line.h * ocrScaleY}px; line-height:{line.h * ocrScaleY}px; font-size:{line.h * ocrScaleY * 0.78}px;"
+          use:fitLine={line.w * ocrScaleX}
+        >{line.text}</div>
+      {/each}
+    </div>
   {/if}
 
   <svg class="absolute inset-0 w-full h-full pointer-events-none" overflow="visible">
@@ -1272,6 +1326,7 @@
       onUndo={undo}
       onRedo={redo}
       onOcr={runOcr}
+      {ocrActive}
       onCopy={() => doExport('copy')}
       onSave={() => doExport('save')}
       onQuickSave={() => doExport('quicksave')}
@@ -1318,48 +1373,32 @@
     </div>
   {/if}
 
-  <!-- OCR busy / result panel -->
-  {#if ocrBusy || ocrText !== null || ocrError}
+  <!-- OCR text-selection mode: floating status / controls -->
+  {#if ocrActive}
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div
-      class="fixed inset-0 z-[60] flex items-center justify-center bg-black/40"
+      class="fixed top-3 left-1/2 -translate-x-1/2 z-[60]"
       style="animation: snapx-fade-in 0.12s ease both;"
-      onmousedown={(e) => { e.stopPropagation(); if (e.target === e.currentTarget) closeOcr(); }}
+      onmousedown={(e) => e.stopPropagation()}
     >
-      <div
-        class="w-[min(560px,90vw)] max-h-[70vh] flex flex-col rounded-xl overflow-hidden border border-white/10 shadow-2xl"
-        style="background: var(--glass-bg); animation: snapx-pop-in 0.16s var(--ease) both;"
-      >
-        <div class="flex items-center gap-2 px-4 py-2.5 border-b border-white/10">
-          <span class="text-white/90 text-sm font-medium">文字识别 (OCR)</span>
-          <div class="flex-1"></div>
-          {#if ocrText}
-            <button
-              class="text-xs px-2.5 py-1 rounded-md text-white font-medium transition-colors"
-              style="background: var(--accent);"
-              onclick={copyOcrText}
-            >{ocrCopied ? '已复制' : '复制全部'}</button>
-          {/if}
+      {#if ocrBusy}
+        <div class="bg-black/70 text-white/80 px-4 py-1.5 rounded-full text-xs backdrop-blur-sm">识别中…</div>
+      {:else if ocrError}
+        <div class="bg-black/70 px-4 py-1.5 rounded-full text-xs backdrop-blur-sm flex items-center gap-3">
+          <span class="text-red-300/90">{ocrError}</span>
+          <button class="text-white/70 hover:text-white" onclick={closeOcr}>退出 (ESC)</button>
+        </div>
+      {:else if ocrData}
+        <div class="bg-black/70 text-white px-3 py-1.5 rounded-full text-xs backdrop-blur-sm flex items-center gap-2 shadow-2xl">
+          <span class="text-white/55">拖拽选择文字 · 双击选词</span>
           <button
-            class="w-7 h-7 rounded-md text-white/60 hover:text-white hover:bg-white/10 transition-colors"
-            onclick={closeOcr}
-            aria-label="关闭"
-          >✕</button>
+            class="px-2.5 py-1 rounded-md text-white font-medium"
+            style="background: var(--accent);"
+            onclick={copyOcrText}
+          >{ocrCopied ? '已复制' : '复制全部'}</button>
+          <button class="px-2 py-1 rounded-md text-white/70 hover:text-white hover:bg-white/10" onclick={closeOcr}>退出 (ESC)</button>
         </div>
-        <div class="flex-1 overflow-auto p-4">
-          {#if ocrBusy}
-            <div class="text-white/60 text-sm text-center py-6">识别中…</div>
-          {:else if ocrError}
-            <div class="text-red-300/90 text-sm text-center py-6">{ocrError}</div>
-          {:else if ocrText}
-            <textarea
-              class="w-full h-full min-h-[160px] bg-black/30 text-white/90 text-sm rounded-lg p-3 resize-none outline-none border border-white/10 font-mono leading-relaxed"
-              readonly
-              onmousedown={(e) => e.stopPropagation()}
-            >{ocrText}</textarea>
-          {/if}
-        </div>
-      </div>
+      {/if}
     </div>
   {/if}
 </div>

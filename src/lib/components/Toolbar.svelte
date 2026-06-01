@@ -43,6 +43,7 @@
     onQuickSave?: () => void;
     onPin?: () => void;
     onCancel?: () => void;
+    ocrActive?: boolean;
   }
 
   let {
@@ -53,6 +54,7 @@
     onFillToggle, onTextBgToggle, onLineStyleChange, onRoundToggle, onArrowStyleChange,
     onShapeSwitch,
     onUndo, onRedo, onOcr, onCopy, onSave, onQuickSave, onPin, onCancel,
+    ocrActive = false,
   }: Props = $props();
 
   // A small set of the most-used colours; a free colour-picker sits beside them.
@@ -332,7 +334,8 @@
 
     <!-- ── Actions: uniform icon buttons (colour-coded) + tooltips ── -->
     <button
-      class="w-8 h-8 flex items-center justify-center rounded-lg text-gray-200 hover:bg-white/10 transition-colors"
+      class="w-8 h-8 flex items-center justify-center rounded-lg transition-colors {ocrActive ? 'text-white' : 'text-gray-200 hover:bg-white/10'}"
+      style={ocrActive ? 'background: var(--accent);' : ''}
       title="提取文字 (OCR)"
       aria-label="提取文字"
       onclick={onOcr}

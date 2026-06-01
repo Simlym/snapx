@@ -64,9 +64,11 @@ pub async fn list_windows(monitor_index: Option<usize>) -> Result<Vec<capture::W
 
 // ── OCR ───────────────────────────────────────────────────────────────────────
 
-/// Recognise text in a base64-encoded PNG using the platform's on-device OCR.
+/// Recognise text in a base64-encoded PNG using on-device PaddleOCR, returning
+/// per-line text with bounding boxes so the frontend can build a selectable
+/// text layer over the screenshot.
 #[tauri::command]
-pub async fn ocr_image(image_data: String) -> Result<String, String> {
+pub async fn ocr_image(image_data: String) -> Result<crate::ocr::OcrResult, String> {
     tauri::async_runtime::spawn_blocking(move || crate::ocr::recognize_base64_png(&image_data))
         .await
         .map_err(|e| e.to_string())?
