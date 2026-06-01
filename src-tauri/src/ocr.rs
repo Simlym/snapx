@@ -99,12 +99,17 @@ fn recognize_one(engine: &ocr_rs::OcrEngine, image_data: &str) -> Result<OcrResu
 
     let mut lines: Vec<OcrLine> = results
         .into_iter()
-        .map(|r| OcrLine {
-            text: r.text,
-            x: r.bbox.x as f32 / scale,
-            y: r.bbox.y as f32 / scale,
-            w: r.bbox.width as f32 / scale,
-            h: r.bbox.height as f32 / scale,
+        .map(|r| {
+            // `bbox.rect` is an imageproc Rect: left()/top() are i32, width()/
+            // height() are u32. Divide the upscale factor back out.
+            let rect = r.bbox.rect;
+            OcrLine {
+                text: r.text,
+                x: rect.left() as f32 / scale,
+                y: rect.top() as f32 / scale,
+                w: rect.width() as f32 / scale,
+                h: rect.height() as f32 / scale,
+            }
         })
         .collect();
 
