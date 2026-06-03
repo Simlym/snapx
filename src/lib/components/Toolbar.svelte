@@ -105,16 +105,12 @@
   let openGroup = $state<string | null>(null);
   function toggleGroup(name: string) { openGroup = openGroup === name ? null : name; }
 
-  // ── Style panel — anchored under the *active* tool's button ────────
-  // The style panel "follows the selection": picking a tool opens it right
-  // under that tool's button. We track each tool button's element so the panel
-  // can centre itself there regardless of which group the tool lives in.
+  // ── Style panel — "layer 2", a white bar stacked under the dark bar ─
+  // PixPin-style two-layer interface: the style/property controls live in a
+  // distinct WHITE pill below the dark main toolbar, left-aligned with it.
   let styleOpen = $state(true);            // open by default once a tool is chosen
-  let toolEls: Partial<Record<ToolType, HTMLElement>> = {};
   let barEl: HTMLElement | undefined = $state();
   let panelEl: HTMLElement | undefined = $state();
-  // Horizontal offset (px) of the panel's centre, relative to the bar's left.
-  let panelCenter = $state(0);
   // Extra px to nudge the panel so it stays on-screen (added to translateX).
   let panelShift = $state(0);
 
@@ -127,27 +123,16 @@
     styleOpen = HAS_STYLE.has(t) || t === 'select';
   }
 
-  // Recompute the panel anchor whenever the active tool (or layout) changes.
+  // Keep layer 2 on-screen. It left-aligns with the bar; nudge it left only if
+  // its right edge would spill past the viewport.
   function updateAnchor() {
-    // Anchor under the button that represents what the panel is editing: the
-    // selected annotation's shape (styleType) if any, else the active tool.
-    // Fall back to the select button so a selection still has an anchor.
-    const btn = toolEls[styleType] ?? toolEls[activeTool] ?? toolEls['select'];
-    if (!btn || !barEl) return;
-    const b = btn.getBoundingClientRect();
+    if (!barEl || !panelEl) return;
     const bar = barEl.getBoundingClientRect();
-    panelCenter = b.left - bar.left + b.width / 2;
-    // Keep the (centred) panel within the viewport: if its left/right edge would
-    // spill off-screen, shift it back by that overflow.
+    const pw = panelEl.offsetWidth;
+    const M = 6;
     panelShift = 0;
-    if (panelEl) {
-      const pw = panelEl.offsetWidth;
-      const desiredLeft = bar.left + panelCenter - pw / 2;
-      const M = 6;
-      if (desiredLeft < M) panelShift = M - desiredLeft;
-      else if (desiredLeft + pw > window.innerWidth - M)
-        panelShift = (window.innerWidth - M) - (desiredLeft + pw);
-    }
+    const overflowRight = bar.left + pw - (window.innerWidth - M);
+    if (overflowRight > 0) panelShift = -overflowRight;
   }
   // Re-anchor whenever the edited target or layout changes.
   $effect(() => {
@@ -162,8 +147,10 @@
   // styleable thing: a selected annotation, or a styleable active tool. Using
   // styleType (selected annotation's type, else active tool) means the panel
   // appears even when the select tool is active (activeTool === 'select').
+  // Hidden while a group dropdown is open so the two downward panels can't
+  // overlap — only one secondary menu shows below the bar at a time.
   const showStyle = $derived(
-    phase === 'annotating' && styleOpen &&
+    phase === 'annotating' && styleOpen && openGroup === null &&
     (hasSelection || HAS_STYLE.has(activeTool)) && HAS_STYLE.has(styleType)
   );
 
@@ -249,9 +236,8 @@
 
     <!-- ── Select tool (standalone) ── -->
     <button
-      bind:this={toolEls['select']}
       class="w-7 h-7 rounded-lg text-xs font-bold transition-all
-        {activeTool === 'select'
+        {phase === 'annotating' && activeTool === 'select'
           ? 'bg-blue-500 text-white shadow-inner'
           : 'text-gray-300 hover:bg-white/10'}"
       title={SELECT_TOOL.title}
@@ -261,11 +247,13 @@
     <!-- ── Grouped drawing tools: main icon + ▾ switch ── -->
     {#each GROUPS as group}
       {@const face = groupFace(group.tools)}
-      {@const active = groupActive(group.tools)}
+      <!-- Only light up as "active" once we're actually annotating. During the
+           selecting phase no drawing tool is committed yet, so the bar stays
+           neutral — the framed region shouldn't look like it's in draw mode. -->
+      {@const active = phase === 'annotating' && groupActive(group.tools)}
       <div class="relative flex items-stretch">
         <!-- Main icon: directly activates the group's current tool. -->
         <button
-          bind:this={toolEls[face.type]}
           class="w-7 h-7 flex items-center justify-center text-xs font-bold transition-all
             {group.tools.length > 1 ? 'rounded-l-lg' : 'rounded-lg'}
             {active ? 'bg-blue-500 text-white shadow-inner' : 'text-gray-300 hover:bg-white/10'}"
@@ -275,23 +263,28 @@
         <!-- Switch caret: opens the group's tool menu (multi-tool groups only). -->
         {#if group.tools.length > 1}
           <button
-            class="w-4 h-7 flex items-center justify-center rounded-r-lg text-[9px] transition-all border-l border-black/20
-              {active ? 'bg-blue-500/80 text-white hover:bg-blue-500' : 'text-gray-400 hover:bg-white/10'}
-              {openGroup === group.name ? 'bg-white/15' : ''}"
+            class="w-4 h-7 flex items-center justify-center rounded-r-lg text-[9px] transition-all
+              {openGroup === group.name
+                ? 'bg-white/20 text-white'
+                : active
+                  ? 'bg-blue-500/25 text-white/75 hover:bg-blue-500/40'
+                  : 'text-gray-400 hover:bg-white/10'}"
             title="切换{group.name}"
             onclick={() => toggleGroup(group.name)}
           >▾</button>
         {/if}
         {#if openGroup === group.name}
           <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <!-- Drops DOWN as a secondary menu (consistent with the style panel),
+               not up — opening upward over the bar felt awkward. -->
           <div
-            class="absolute bottom-9 left-1/2 -translate-x-1/2 flex gap-0.5 bg-[#2a2a2a] rounded-xl p-1.5 shadow-2xl border border-white/10 z-50"
+            class="absolute top-full mt-2 left-1/2 -translate-x-1/2 flex gap-0.5 bg-white rounded-xl p-1.5 shadow-2xl border border-black/10 z-50"
             onmousedown={stopProp}
           >
             {#each group.tools as tool}
               <button
                 class="w-8 h-8 rounded-lg text-sm font-bold transition-all
-                  {activeTool === tool.type ? 'bg-blue-500 text-white' : 'text-gray-300 hover:bg-white/10'}"
+                  {activeTool === tool.type ? 'bg-blue-500 text-white' : 'text-gray-600 hover:bg-black/5'}"
                 title={tool.title}
                 onclick={() => pickTool(tool.type)}
               >{tool.label}</button>
@@ -303,9 +296,8 @@
 
     <!-- ── Eraser (standalone) ── -->
     <button
-      bind:this={toolEls['eraser']}
       class="w-7 h-7 rounded-lg text-xs font-bold transition-all
-        {activeTool === 'eraser'
+        {phase === 'annotating' && activeTool === 'eraser'
           ? 'bg-blue-500 text-white shadow-inner'
           : 'text-gray-300 hover:bg-white/10'}"
       title={ERASER_TOOL.title}
@@ -404,20 +396,16 @@
       </svg>
     </button>
 
-    <!-- ── Style panel: anchored UNDER the active tool, follows the selection ── -->
+    <!-- ── Layer 2: white style bar, stacked under the dark main toolbar ── -->
     {#if showStyle}
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div
         bind:this={panelEl}
-        class="absolute top-full mt-2 bg-[#2a2a2a] rounded-xl px-2 py-1.5 shadow-2xl border border-white/10 z-50 flex items-center gap-2 whitespace-nowrap"
-        style="left:{panelCenter}px; transform: translateX(calc(-50% + {panelShift}px)); animation: snapx-pop-in 0.14s var(--ease) both;"
+        class="absolute top-full mt-2 left-0 bg-white rounded-xl px-2 py-1.5 shadow-2xl border border-black/10 z-50 flex items-center gap-2 whitespace-nowrap"
+        style="transform: translateX({panelShift}px); animation: snapx-pop-in 0.14s var(--ease) both;"
         onmousedown={stopProp}
         onmouseup={stopProp}
       >
-        <!-- Little pointer up toward the active tool button (counter the clamp shift). -->
-        <div class="absolute -top-1.5 left-1/2 w-3 h-3 rotate-45 bg-[#2a2a2a] border-l border-t border-white/10"
-          style="transform: translateX(calc(-50% - {panelShift}px)) rotate(45deg);"></div>
-
         <!-- All trait controls key off `styleType` (the SELECTED annotation's
              type if any, else the active tool) so the panel edits whatever is
              under focus. Shape-switch first, then size, line, arrow, round,
@@ -429,34 +417,34 @@
           <div class="flex items-center gap-1">
             <button
               class="w-7 h-7 flex items-center justify-center rounded-lg text-sm font-bold transition-all
-                {styleType === 'rect' ? 'bg-blue-500/80 text-white' : 'text-gray-400 hover:bg-white/10'}"
+                {styleType === 'rect' ? 'bg-blue-500 text-white' : 'text-gray-500 hover:bg-black/5'}"
               title="矩形"
               onclick={() => onShapeSwitch?.('rect')}
             >▭</button>
             <button
               class="w-7 h-7 flex items-center justify-center rounded-lg text-sm font-bold transition-all
-                {styleType === 'ellipse' ? 'bg-blue-500/80 text-white' : 'text-gray-400 hover:bg-white/10'}"
+                {styleType === 'ellipse' ? 'bg-blue-500 text-white' : 'text-gray-500 hover:bg-black/5'}"
               title="椭圆"
               onclick={() => onShapeSwitch?.('ellipse')}
             >◯</button>
           </div>
-          <div class="w-px h-6 bg-white/15"></div>
+          <div class="w-px h-6 bg-black/10"></div>
         {:else if hasSelection && (styleType === 'arrow' || styleType === 'line')}
           <div class="flex items-center gap-1">
             <button
               class="w-7 h-7 flex items-center justify-center rounded-lg text-sm font-bold transition-all
-                {styleType === 'arrow' ? 'bg-blue-500/80 text-white' : 'text-gray-400 hover:bg-white/10'}"
+                {styleType === 'arrow' ? 'bg-blue-500 text-white' : 'text-gray-500 hover:bg-black/5'}"
               title="箭头"
               onclick={() => onShapeSwitch?.('arrow')}
             >↗</button>
             <button
               class="w-7 h-7 flex items-center justify-center rounded-lg text-sm font-bold transition-all
-                {styleType === 'line' ? 'bg-blue-500/80 text-white' : 'text-gray-400 hover:bg-white/10'}"
+                {styleType === 'line' ? 'bg-blue-500 text-white' : 'text-gray-500 hover:bg-black/5'}"
               title="直线"
               onclick={() => onShapeSwitch?.('line')}
             >╱</button>
           </div>
-          <div class="w-px h-6 bg-white/15"></div>
+          <div class="w-px h-6 bg-black/10"></div>
         {/if}
 
         <!-- Brush / stroke size — scroll over this area or drag the slider. -->
@@ -468,17 +456,17 @@
               class="snapx-range w-20"
               oninput={(e) => onStrokeWidthChange?.(+(e.target as HTMLInputElement).value)}
             />
-            <span class="text-[10px] text-gray-300 font-mono tabular-nums w-7 text-right">{strokeWidth}px</span>
+            <span class="text-[10px] text-gray-600 font-mono tabular-nums w-7 text-right">{strokeWidth}px</span>
           </div>
         {/if}
 
         <!-- Line style: solid / dashed (shapes & lines) -->
         {#if HAS_DASH.has(styleType)}
-          {#if HAS_STROKE.has(styleType)}<div class="w-px h-6 bg-white/15"></div>{/if}
+          {#if HAS_STROKE.has(styleType)}<div class="w-px h-6 bg-black/10"></div>{/if}
           <div class="flex items-center gap-1">
             <button
               class="w-9 h-7 flex items-center justify-center rounded-lg transition-all
-                {lineStyle === 'solid' ? 'bg-blue-500/80 text-white' : 'text-gray-400 hover:bg-white/10'}"
+                {lineStyle === 'solid' ? 'bg-blue-500 text-white' : 'text-gray-500 hover:bg-black/5'}"
               title="实线"
               onclick={() => onLineStyleChange?.('solid')}
             >
@@ -486,7 +474,7 @@
             </button>
             <button
               class="w-9 h-7 flex items-center justify-center rounded-lg transition-all
-                {lineStyle === 'dashed' ? 'bg-blue-500/80 text-white' : 'text-gray-400 hover:bg-white/10'}"
+                {lineStyle === 'dashed' ? 'bg-blue-500 text-white' : 'text-gray-500 hover:bg-black/5'}"
               title="虚线"
               onclick={() => onLineStyleChange?.('dashed')}
             >
@@ -497,23 +485,23 @@
 
         <!-- Arrow style: end / both / none -->
         {#if styleType === 'arrow'}
-          <div class="w-px h-6 bg-white/15"></div>
+          <div class="w-px h-6 bg-black/10"></div>
           <div class="flex items-center gap-1">
             <button
               class="w-7 h-7 flex items-center justify-center rounded-lg transition-all
-                {arrowStyle === 'end' ? 'bg-blue-500/80 text-white' : 'text-gray-400 hover:bg-white/10'}"
+                {arrowStyle === 'end' ? 'bg-blue-500 text-white' : 'text-gray-500 hover:bg-black/5'}"
               title="单向箭头"
               onclick={() => onArrowStyleChange?.('end')}
             >→</button>
             <button
               class="w-7 h-7 flex items-center justify-center rounded-lg transition-all
-                {arrowStyle === 'both' ? 'bg-blue-500/80 text-white' : 'text-gray-400 hover:bg-white/10'}"
+                {arrowStyle === 'both' ? 'bg-blue-500 text-white' : 'text-gray-500 hover:bg-black/5'}"
               title="双向箭头"
               onclick={() => onArrowStyleChange?.('both')}
             >↔</button>
             <button
               class="w-7 h-7 flex items-center justify-center rounded-lg transition-all
-                {arrowStyle === 'none' ? 'bg-blue-500/80 text-white' : 'text-gray-400 hover:bg-white/10'}"
+                {arrowStyle === 'none' ? 'bg-blue-500 text-white' : 'text-gray-500 hover:bg-black/5'}"
               title="无箭头"
               onclick={() => onArrowStyleChange?.('none')}
             >—</button>
@@ -522,10 +510,10 @@
 
         <!-- Rounded corners (rect only) -->
         {#if styleType === 'rect'}
-          <div class="w-px h-6 bg-white/15"></div>
+          <div class="w-px h-6 bg-black/10"></div>
           <button
             class="w-7 h-7 flex items-center justify-center rounded-lg transition-all
-              {roundCorners ? 'bg-blue-500/80 text-white' : 'text-gray-300 hover:bg-white/10'}"
+              {roundCorners ? 'bg-blue-500 text-white' : 'text-gray-500 hover:bg-black/5'}"
             title={roundCorners ? '圆角' : '直角'}
             onclick={onRoundToggle}
           >
@@ -537,10 +525,10 @@
 
         <!-- Fill toggle (rect / ellipse) -->
         {#if HAS_FILL.has(styleType)}
-          <div class="w-px h-6 bg-white/15"></div>
+          <div class="w-px h-6 bg-black/10"></div>
           <button
             class="w-7 h-7 flex items-center justify-center rounded-lg text-sm transition-all
-              {fillMode ? 'bg-blue-500/80 text-white' : 'text-gray-300 hover:bg-white/10'}"
+              {fillMode ? 'bg-blue-500 text-white' : 'text-gray-500 hover:bg-black/5'}"
             title={fillMode ? '实心' : '空心'}
             onclick={onFillToggle}
           >{fillMode ? '■' : '□'}</button>
@@ -548,10 +536,10 @@
 
         <!-- Text background toggle -->
         {#if styleType === 'text'}
-          <div class="w-px h-6 bg-white/15"></div>
+          <div class="w-px h-6 bg-black/10"></div>
           <button
             class="h-7 px-2 flex items-center justify-center rounded-lg text-xs font-medium transition-all
-              {textBg ? 'bg-blue-500/80 text-white' : 'text-gray-300 hover:bg-white/10'}"
+              {textBg ? 'bg-blue-500 text-white' : 'text-gray-500 hover:bg-black/5'}"
             title="文字背景"
             onclick={onTextBgToggle}
           >背景</button>
@@ -561,20 +549,20 @@
              Divider only when some control precedes colour (mosaic/highlight
              expose colour only, so no leading divider for them). -->
         {#if HAS_STROKE.has(styleType) || HAS_DASH.has(styleType) || HAS_FILL.has(styleType) || styleType === 'text'}
-          <div class="w-px h-6 bg-white/15"></div>
+          <div class="w-px h-6 bg-black/10"></div>
         {/if}
         <div class="flex items-center gap-1">
           {#each PRESET_COLORS as c}
             <button
               class="w-6 h-6 rounded-full border-2 transition-transform hover:scale-110
-                {c === color ? 'border-white scale-110' : 'border-white/15'}"
+                {c === color ? 'border-blue-500 scale-110' : 'border-black/10'}"
               style="background:{c}"
               aria-label="选择颜色 {c}"
               onclick={() => onColorChange?.(c)}
             ></button>
           {/each}
           <label
-            class="relative w-6 h-6 rounded-full cursor-pointer overflow-hidden border-2 border-white/30 flex items-center justify-center shrink-0"
+            class="relative w-6 h-6 rounded-full cursor-pointer overflow-hidden border-2 border-black/20 flex items-center justify-center shrink-0"
             title="自定义颜色"
             style="background: conic-gradient(red, yellow, lime, aqua, blue, magenta, red)"
           >
@@ -591,13 +579,13 @@
 </div>
 
 <style>
-  /* Compact range slider matching the dark glass theme. */
+  /* Compact range slider for the white layer-2 bar. */
   .snapx-range {
     -webkit-appearance: none;
     appearance: none;
     height: 4px;
     border-radius: 999px;
-    background: rgba(255, 255, 255, 0.18);
+    background: rgba(0, 0, 0, 0.15);
     outline: none;
   }
   .snapx-range::-webkit-slider-thumb {

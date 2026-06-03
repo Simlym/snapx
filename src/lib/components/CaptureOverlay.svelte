@@ -35,6 +35,10 @@
     onquicksave?: (imageData: string) => void;
     onpin?: (imageData: string, pxW: number, pxH: number) => void;
     oncancel?: () => void;
+    /** Full-screen screenshot used by the magnifier cursor during selection. */
+    magnifierSrc?: string;
+    magnifierW?: number;
+    magnifierH?: number;
     /** Long-screenshot mode: emits the chosen region in physical pixels. */
     scrollMode?: boolean;
     onscroll?: (region: { x: number; y: number; w: number; h: number }) => void;
@@ -50,6 +54,7 @@
     screenshotWidth = $bindable(0),
     screenshotHeight = $bindable(0),
     oncopy, onsave, onquicksave, onpin, oncancel,
+    magnifierSrc = '', magnifierW = 0, magnifierH = 0,
     scrollMode = false, onscroll, captureForSelection,
   }: Props = $props();
   let bgSrc = $derived(screenshotData ? `data:image/png;base64,${screenshotData}` : '');
@@ -70,52 +75,93 @@
   // ── Mouse tracking (magnifier) ────────────────────────────────────
   let mx = $state(0), my = $state(0);
 
-  // ── Eyedropper (colour under cursor) ──────────────────────────────
-  // An offscreen canvas holds the full screenshot so we can read the exact
-  // pixel colour under the cursor while choosing a region (Snipaste-style).
-  // Built lazily on first sample so the capture path stays fast.
+  // Whether the cursor is over (or just outside) the committed selection. The
+  // resize grips key off this so a finished region reads as a clean box — not a
+  // "selected" object covered in handles — until you actually move to adjust it.
+  const GRIP_REVEAL = 14;
+  let nearSel = $derived(
+    hasSel &&
+    mx >= sel.x - GRIP_REVEAL && mx <= sel.x + sel.w + GRIP_REVEAL &&
+    my >= sel.y - GRIP_REVEAL && my <= sel.y + sel.h + GRIP_REVEAL
+  );
+
+  // ── Eyedropper / magnifier colour sampling ────────────────────────
+  // Samples pixel colour from the full-screen magnifier screenshot (available
+  // from capture-open, before any region is committed) so the colour picker
+  // works the moment capture mode opens — Snipaste-style.
   let pickedColor = $state('');
   let colorCopied = $state(false);
-  let sampleCanvas: HTMLCanvasElement | null = null;
-  let sampleCtx: CanvasRenderingContext2D | null = null;
-  let sampleImg: HTMLImageElement | null = null;
+  let colorFormat: 'hex' | 'rgb' | 'hsl' = $state('rgb');
+  let magnifierCanvas: HTMLCanvasElement | null = null;
+  let magnifierCtx: CanvasRenderingContext2D | null = null;
+  let magnifierImgEl: HTMLImageElement | null = null;
 
-  function ensureSampleCanvas() {
-    // No screenshot during the selecting phase → eyedropper is disabled.
-    if (!screenshotData) return;
-    if (sampleCtx || sampleImg) return;
-    sampleImg = new Image();
-    sampleImg.onload = () => {
+  // Reset the offscreen canvas whenever the source image changes.
+  $effect(() => {
+    magnifierSrc; // track
+    magnifierCanvas = null;
+    magnifierCtx    = null;
+    magnifierImgEl  = null;
+  });
+
+  function ensureMagnifierCanvas() {
+    if (!magnifierSrc) return;
+    if (magnifierCtx || magnifierImgEl) return;
+    magnifierImgEl = new Image();
+    magnifierImgEl.onload = () => {
+      const w = magnifierW || magnifierImgEl!.naturalWidth;
+      const h = magnifierH || magnifierImgEl!.naturalHeight;
       const c = document.createElement('canvas');
-      c.width = screenshotWidth;
-      c.height = screenshotHeight;
+      c.width = w; c.height = h;
       const ctx = c.getContext('2d', { willReadFrequently: true });
       if (ctx) {
-        ctx.drawImage(sampleImg!, 0, 0, screenshotWidth, screenshotHeight);
-        sampleCanvas = c;
-        sampleCtx = ctx;
+        ctx.drawImage(magnifierImgEl!, 0, 0, w, h);
+        magnifierCanvas = c;
+        magnifierCtx    = ctx;
       }
     };
-    sampleImg.src = bgSrc;
+    magnifierImgEl.src = magnifierSrc;
   }
 
   function sampleColorAt(clientX: number, clientY: number) {
-    ensureSampleCanvas();
-    if (!sampleCtx) return;
-    const scaleX = screenshotWidth / window.innerWidth;
-    const scaleY = screenshotHeight / window.innerHeight;
-    const px = Math.max(0, Math.min(screenshotWidth - 1, Math.round(clientX * scaleX)));
-    const py = Math.max(0, Math.min(screenshotHeight - 1, Math.round(clientY * scaleY)));
+    ensureMagnifierCanvas();
+    if (!magnifierCtx || !magnifierW || !magnifierH) return;
+    const scaleX = magnifierW / window.innerWidth;
+    const scaleY = magnifierH / window.innerHeight;
+    const px = Math.max(0, Math.min(magnifierW - 1, Math.round(clientX * scaleX)));
+    const py = Math.max(0, Math.min(magnifierH - 1, Math.round(clientY * scaleY)));
     try {
-      const d = sampleCtx.getImageData(px, py, 1, 1).data;
+      const d = magnifierCtx.getImageData(px, py, 1, 1).data;
       pickedColor = '#' + [d[0], d[1], d[2]].map((v) => v.toString(16).padStart(2, '0')).join('');
     } catch (_) { /* not ready */ }
+  }
+
+  function formattedColor(hex: string, fmt: 'hex' | 'rgb' | 'hsl'): string {
+    const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex);
+    if (!m) return hex;
+    const r = parseInt(m[1], 16), g = parseInt(m[2], 16), b = parseInt(m[3], 16);
+    if (fmt === 'rgb') return `rgb(${r}, ${g}, ${b})`;
+    if (fmt === 'hsl') {
+      const rn = r / 255, gn = g / 255, bn = b / 255;
+      const max = Math.max(rn, gn, bn), min = Math.min(rn, gn, bn);
+      const l = (max + min) / 2;
+      let h = 0, s = 0;
+      if (max !== min) {
+        const d = max - min;
+        s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+        if (max === rn) h = ((gn - bn) / d + (gn < bn ? 6 : 0)) / 6;
+        else if (max === gn) h = ((bn - rn) / d + 2) / 6;
+        else h = ((rn - gn) / d + 4) / 6;
+      }
+      return `hsl(${Math.round(h * 360)}, ${Math.round(s * 100)}%, ${Math.round(l * 100)}%)`;
+    }
+    return hex.toUpperCase();
   }
 
   async function copyPickedColor() {
     if (!pickedColor) return;
     try {
-      await navigator.clipboard.writeText(pickedColor);
+      await navigator.clipboard.writeText(formattedColor(pickedColor, colorFormat));
       colorCopied = true;
       setTimeout(() => (colorCopied = false), 900);
     } catch (_) { /* clipboard unavailable */ }
@@ -379,6 +425,7 @@
     if (textVisible && e.key !== 'Escape') return;
 
     if (e.key === 'Escape') {
+      if (ocrEditVisible) { ocrEditVisible = false; return; }
       if (ocrActive) { ocrActive = false; return; }
       if (textVisible) { textVisible = false; return; }
       if (phase === 'annotating') { selectedId = null; backToSelecting(); return; }
@@ -392,7 +439,12 @@
       if (phase === 'annotating') { doExport('copy'); return; }
     }
 
-    // Eyedropper: copy the colour under the cursor while still choosing a region.
+    // Eyedropper: cycle colour format (Shift) or copy colour value (C).
+    if (phase === 'selecting' && e.key === 'Shift' && !e.ctrlKey && !e.metaKey) {
+      const fmts: ('hex' | 'rgb' | 'hsl')[] = ['hex', 'rgb', 'hsl'];
+      colorFormat = fmts[(fmts.indexOf(colorFormat) + 1) % fmts.length];
+      return;
+    }
     if (phase === 'selecting' && e.key.toLowerCase() === 'c' && !e.ctrlKey && !e.metaKey) {
       copyPickedColor();
       return;
@@ -466,6 +518,7 @@
     ocrActive = false;
     ocrData = null;
     ocrError = null;
+    ocrEditVisible = false;
   }
 
   function pushUndo() {
@@ -659,17 +712,20 @@
 
     if (activeTool === 'counter') {
       pushUndo();
+      const newId = crypto.randomUUID();
       annotations = [...annotations, {
-        id: crypto.randomUUID(), type: 'counter',
+        id: newId, type: 'counter',
         color: activeColor, sw: activeStroke,
         x: e.clientX, y: e.clientY, n: counterNum,
       }];
+      selectedId = newId;
       counterNum++;
       return;
     }
 
     annDragging = true;
     annOx = e.clientX; annOy = e.clientY;
+    selectedId = null;
     const base = { id: crypto.randomUUID(), color: activeColor, sw: activeStroke };
 
     if (activeTool === 'rect' || activeTool === 'ellipse') {
@@ -769,19 +825,21 @@
       valid = currentAnn.pts.length > 2;
     }
 
-    if (valid) { pushUndo(); annotations = [...annotations, currentAnn]; }
+    if (valid) { pushUndo(); annotations = [...annotations, currentAnn]; selectedId = currentAnn.id; }
     currentAnn = null;
   }
 
   function commitText() {
     if (textVal.trim()) {
       pushUndo();
+      const newId = crypto.randomUUID();
       const fontSize = 14 + activeStroke * 2;
       annotations = [...annotations, {
-        id: crypto.randomUUID(), type: 'text',
+        id: newId, type: 'text',
         color: activeColor, sw: activeStroke,
         x: textPx, y: textPy + fontSize, text: textVal.trim(), bg: textBg,
       }];
+      selectedId = newId;
     }
     textVisible = false;
     textVal = '';
@@ -841,6 +899,31 @@
   let ocrBusy = $state(false);
   let ocrError = $state<string | null>(null);
   let ocrCopied = $state(false);
+  let ocrSelection = $state('');
+  let ocrSelectionRect = $state<{ top: number; left: number; width: number } | null>(null);
+  let ocrEditVisible = $state(false);
+  let ocrEditText = $state('');
+  let ocrEditX = $state(0);
+  let ocrEditY = $state(0);
+  let ocrEditDragging = false;
+  let ocrEditDragDX = 0, ocrEditDragDY = 0;
+
+  $effect(() => {
+    if (!ocrActive) { ocrSelection = ''; ocrSelectionRect = null; return; }
+    const handler = () => {
+      const s = window.getSelection();
+      const text = s?.toString() ?? '';
+      ocrSelection = text;
+      if (text && s && s.rangeCount > 0) {
+        const r = s.getRangeAt(0).getBoundingClientRect();
+        ocrSelectionRect = { top: r.top, left: r.left + r.width / 2, width: r.width };
+      } else {
+        ocrSelectionRect = null;
+      }
+    };
+    document.addEventListener('selectionchange', handler);
+    return () => document.removeEventListener('selectionchange', handler);
+  });
 
   // The screenshot is drawn 1:1 over the selection rect, so OCR boxes (in
   // recognised-image px) map to viewport CSS px by sel-size / screenshot-size.
@@ -868,17 +951,42 @@
     }
   }
 
-  async function copyOcrText() {
-    const text = ocrData ? ocrData.lines.map((l) => l.text).join('\n') : '';
-    if (!text) return;
+  function openOcrEdit(text: string) {
+    ocrEditText = text;
+    ocrEditX = Math.round((window.innerWidth - 420) / 2);
+    ocrEditY = Math.round((window.innerHeight - 320) / 2);
+    ocrEditVisible = true;
+  }
+
+  function ocrEditDragStart(e: MouseEvent) {
+    e.preventDefault(); e.stopPropagation();
+    ocrEditDragging = true;
+    ocrEditDragDX = e.clientX - ocrEditX;
+    ocrEditDragDY = e.clientY - ocrEditY;
+    window.addEventListener('mousemove', ocrEditDragMove, true);
+    window.addEventListener('mouseup', ocrEditDragEnd, true);
+  }
+  function ocrEditDragMove(e: MouseEvent) {
+    if (!ocrEditDragging) return;
+    ocrEditX = Math.max(0, Math.min(window.innerWidth - 420, e.clientX - ocrEditDragDX));
+    ocrEditY = Math.max(0, Math.min(window.innerHeight - 80, e.clientY - ocrEditDragDY));
+  }
+  function ocrEditDragEnd() {
+    ocrEditDragging = false;
+    window.removeEventListener('mousemove', ocrEditDragMove, true);
+    window.removeEventListener('mouseup', ocrEditDragEnd, true);
+  }
+
+  async function confirmOcrEdit() {
+    if (!ocrEditText.trim()) return;
     try {
-      await navigator.clipboard.writeText(text);
+      await navigator.clipboard.writeText(ocrEditText);
       ocrCopied = true;
-      setTimeout(() => (ocrCopied = false), 1000);
+      setTimeout(() => { ocrCopied = false; ocrEditVisible = false; }, 800);
     } catch (_) { /* unavailable */ }
   }
 
-  function closeOcr() { ocrActive = false; }
+  function closeOcr() { ocrActive = false; ocrEditVisible = false; }
 
   // Stretch a text-layer line to exactly fill its box width (pdf.js technique)
   // so the transparent selectable text lines up with the glyphs in the image.
@@ -1149,10 +1257,11 @@
         fill="none"
         stroke={phase === 'annotating' ? '#3b82f6' : 'rgba(59,130,246,0.9)'}
         stroke-width="2" />
-      {#if phase === 'selecting' && !capturing}
+      {#if phase === 'selecting' && !capturing && nearSel}
         <!-- 8 resize grips (corners + edge midpoints). Drag any to resize, or
              drag inside the box to move it — handled in selDown/selMove.
-             Hidden during the grab so they don't bake into the crop. -->
+             Shown only on hover (nearSel) so a committed region looks clean,
+             and hidden during the grab so they don't bake into the crop. -->
         {#each selHandles() as h}
           <rect x={h.x - 4} y={h.y - 4} width="8" height="8"
             fill={hoveredSelHandle === h.id ? 'rgba(59,130,246,0.95)' : 'white'}
@@ -1273,10 +1382,8 @@
     <SizeIndicator x={sel.x} y={sel.y} width={sel.w} height={sel.h} />
   {/if}
 
-  {#if phase === 'selecting' && screenshotData}
-    <!-- Eyedropper/magnifier needs the captured bitmap, which only exists after
-         a region is committed → effectively disabled during live selection. -->
-    <Magnifier screenshotSrc={bgSrc} mouseX={mx} mouseY={my} color={pickedColor} copied={colorCopied} />
+  {#if phase === 'selecting' && magnifierSrc}
+    <Magnifier screenshotSrc={magnifierSrc} mouseX={mx} mouseY={my} color={pickedColor} copied={colorCopied} {colorFormat} />
   {/if}
 
   {#if scrollMode && hasSel && !selecting}
@@ -1394,11 +1501,76 @@
           <button
             class="px-2.5 py-1 rounded-md text-white font-medium"
             style="background: var(--accent);"
-            onclick={copyOcrText}
-          >{ocrCopied ? '已复制' : '复制全部'}</button>
+            onclick={() => openOcrEdit(ocrData!.lines.map(l => l.text).join('\n'))}
+          >复制全部</button>
           <button class="px-2 py-1 rounded-md text-white/70 hover:text-white hover:bg-white/10" onclick={closeOcr}>退出 (ESC)</button>
         </div>
       {/if}
+    </div>
+  {/if}
+
+  <!-- Floating copy button: appears above the drag-selected text in the OCR layer -->
+  {#if ocrActive && ocrSelection && ocrSelectionRect}
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div
+      class="fixed z-[65] pointer-events-none"
+      style="left:{ocrSelectionRect.left}px; top:{Math.max(36, ocrSelectionRect.top - 8)}px; transform:translate(-50%,-100%);"
+    >
+      <button
+        class="pointer-events-auto px-3 py-1 rounded-lg text-white text-xs font-semibold shadow-xl"
+        style="background:var(--accent); animation:snapx-pop-in 0.1s var(--ease) both;"
+        onmousedown={(e) => { e.preventDefault(); e.stopPropagation(); }}
+        onclick={() => openOcrEdit(ocrSelection)}
+      >复制</button>
+    </div>
+  {/if}
+
+  <!-- OCR edit dialog: draggable floating panel, no backdrop so user can compare -->
+  {#if ocrEditVisible}
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div
+      class="fixed z-[70] bg-[#1e1e1e] rounded-2xl shadow-2xl border border-white/10 flex flex-col"
+      style="left:{ocrEditX}px; top:{ocrEditY}px; width:420px; max-width:calc(100vw - 16px); animation:snapx-pop-in 0.12s var(--ease) both;"
+      onmousedown={(e) => e.stopPropagation()}
+      onmousemove={(e) => e.stopPropagation()}
+      onmouseup={(e) => e.stopPropagation()}
+    >
+      <!-- Title bar = drag handle -->
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div
+        class="flex items-center justify-between px-4 pt-3.5 pb-2 cursor-grab active:cursor-grabbing select-none"
+        onmousedown={ocrEditDragStart}
+      >
+        <div class="text-white/80 text-sm font-semibold">
+          识别结果
+          <span class="text-white/35 font-normal text-xs ml-1.5">可修改后复制</span>
+        </div>
+        <button
+          class="text-white/35 hover:text-white/80 text-xl leading-none transition-colors px-1"
+          onmousedown={(e) => e.stopPropagation()}
+          onclick={() => { ocrEditVisible = false; }}
+        >×</button>
+      </div>
+      <div class="px-4 pb-4 flex flex-col gap-3">
+        <textarea
+          class="bg-black/40 text-white text-sm rounded-xl p-3 border border-white/10 resize-none outline-none leading-relaxed"
+          style="height:180px; font-family:inherit;"
+          bind:value={ocrEditText}
+          spellcheck={false}
+          onkeydown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); ocrEditVisible = false; } }}
+        ></textarea>
+        <div class="flex gap-2 justify-end">
+          <button
+            class="px-3 py-1.5 rounded-lg text-sm text-white/55 hover:text-white hover:bg-white/10 transition-colors"
+            onclick={() => { ocrEditVisible = false; }}
+          >取消</button>
+          <button
+            class="px-5 py-1.5 rounded-lg text-sm text-white font-medium transition-colors"
+            style="background:var(--accent);"
+            onclick={confirmOcrEdit}
+          >{ocrCopied ? '已复制 ✓' : '复制'}</button>
+        </div>
+      </div>
     </div>
   {/if}
 </div>

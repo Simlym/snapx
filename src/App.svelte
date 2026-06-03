@@ -28,6 +28,9 @@
   let screenshotWidth  = $state(0);
   let screenshotHeight = $state(0);
   let overlayScrollMode = $state(false);
+  let magnifierSrc  = $state('');
+  let magnifierW    = $state(0);
+  let magnifierH    = $state(0);
   /** "png" = base64 PNG, "rgba" = raw RGBA pixels (base64) needing canvas decode */
   let screenshotFormat = $state<'png' | 'rgba'>('png');
 
@@ -157,7 +160,20 @@
         perf(`[overlay] start-selection received, mode=${event.payload}`);
         // Reset so a fresh selection starts clean each time.
         screenshotData    = null;
+        magnifierSrc      = '';
+        magnifierW        = 0;
+        magnifierH        = 0;
         overlayScrollMode = event.payload === 'scroll';
+        // Fire full-screen capture for magnifier in background (non-blocking).
+        // Fired before overlayVisible = true to minimise the chance that the
+        // hint-text box bakes into the screenshot.
+        invoke<{ image_data: string; width: number; height: number }>(
+          'capture_screens', { monitorIndex: 0 }
+        ).then(r => {
+          magnifierSrc = `data:image/png;base64,${r.image_data}`;
+          magnifierW   = r.width;
+          magnifierH   = r.height;
+        }).catch(() => {});
         overlayVisible    = true;
         requestAnimationFrame(() => requestAnimationFrame(() => {
           perf(`[overlay] selection UI painted: +${(performance.now() - t0).toFixed(0)}ms (INSTANT)`);
@@ -461,6 +477,9 @@
   async function hideOverlay() {
     overlayVisible = false;
     screenshotData = null;
+    magnifierSrc   = '';
+    magnifierW     = 0;
+    magnifierH     = 0;
     // Keep the window fullscreen (just hide it) so the next capture skips the
     // fullscreen transition entirely.
     await currentWindow.hide();
@@ -479,6 +498,9 @@
     bind:screenshotHeight
     scrollMode={overlayScrollMode}
     {captureForSelection}
+    {magnifierSrc}
+    {magnifierW}
+    {magnifierH}
     oncopy={onCopy}
     onsave={onSave}
     onquicksave={onQuickSave}
